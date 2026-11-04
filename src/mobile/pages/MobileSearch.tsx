@@ -1,9 +1,10 @@
 /**
- * 移动端「搜索」页：热词 + 单曲/歌单双结果。防抖 300ms，回车/按钮立即搜索。
+ * 移动端「搜索」页：热词 + 单曲/歌单/歌手/专辑四类结果。防抖 300ms，回车/按钮立即搜索。
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import {
-  searchSongs, searchPlaylists, searchHot, type SearchResult, type PlaylistSearchResult,
+  searchSongs, searchPlaylists, searchArtists, searchAlbums, searchHot,
+  type SearchResult, type PlaylistSearchResult, type Artist, type Album,
 } from '../../services/musicApi'
 import type { Song } from '../../services/musicApi'
 import { useMobilePlayer } from '../mobilePlayer'
@@ -12,7 +13,7 @@ import {
   Cover, IconSearch, IconClose, IconClock, IconSearchDel, Spinner, fmtCount, songArtists, useLazyList,
 } from '../ui'
 
-type ResultTab = 'songs' | 'playlists'
+type ResultTab = 'songs' | 'playlists' | 'artists' | 'albums'
 const HISTORY_KEY = 'waveforge:mobile-search-history'
 
 function readHistory(): string[] {
@@ -50,6 +51,8 @@ export default memo(function MobileSearch() {
   const [tab, setTab] = useState<ResultTab>('songs')
   const [songResult, setSongResult] = useState<SearchResult | null>(null)
   const [plResult, setPlResult] = useState<PlaylistSearchResult | null>(null)
+  const [artistResult, setArtistResult] = useState<Artist[] | null>(null)
+  const [albumResult, setAlbumResult] = useState<Album[] | null>(null)
   const [hotWords, setHotWords] = useState<string[]>([])
   const [history, setHistory] = useState<string[]>(readHistory)
   const [loading, setLoading] = useState(false)
@@ -68,9 +71,13 @@ export default memo(function MobileSearch() {
     setLoading(true)
     setSongResult(null)
     setPlResult(null)
+    setArtistResult(null)
+    setAlbumResult(null)
     const jobs = [
       searchSongs(q, 40, nav.platform).then(setSongResult).catch(() => undefined),
       searchPlaylists(q, nav.platform, 20).then(setPlResult).catch(() => undefined),
+      searchArtists(q, nav.platform).then(setArtistResult).catch(() => undefined),
+      searchAlbums(q, nav.platform).then(setAlbumResult).catch(() => undefined),
     ]
     Promise.all(jobs).finally(() => setLoading(false))
     try { inputRef.current?.blur() } catch { /* ignore */ }
@@ -78,6 +85,8 @@ export default memo(function MobileSearch() {
 
   const songs = songResult?.songs || []
   const playlists = plResult?.playlists || []
+  const artists = artistResult || []
+  const albums = albumResult || []
 
   return (
     <div className="wf-m-page">
@@ -89,7 +98,7 @@ export default memo(function MobileSearch() {
             className="wf-m-search-input"
             type="search"
             enterKeyHint="search"
-            placeholder={`搜索歌曲、歌手、歌单`}
+            placeholder={`搜索歌曲、歌手、歌单、专辑`}
             value={keyword}
             onChange={e => setKeyword(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') doSearch(keyword) }}
@@ -152,6 +161,12 @@ export default memo(function MobileSearch() {
             <button type="button" className={`wf-m-tab ${tab === 'playlists' ? 'is-on' : ''}`} onClick={() => setTab('playlists')}>
               歌单{playlists.length ? ` ${playlists.length}` : ''}
             </button>
+            <button type="button" className={`wf-m-tab ${tab === 'artists' ? 'is-on' : ''}`} onClick={() => setTab('artists')}>
+              歌手{artists.length ? ` ${artists.length}` : ''}
+            </button>
+            <button type="button" className={`wf-m-tab ${tab === 'albums' ? 'is-on' : ''}`} onClick={() => setTab('albums')}>
+              专辑{albums.length ? ` ${albums.length}` : ''}
+            </button>
           </div>
           {loading && <Spinner label="搜索中…" />}
           {!loading && tab === 'songs' && (
@@ -159,29 +174,73 @@ export default memo(function MobileSearch() {
               activeSong={player.currentSong} />
           )}
           {!loading && tab === 'playlists' && (
+            <PlaylistResults playlists={playlists} onOpen={pl => nav.openPlaylist({
+              id: pl.id, name: pl.name, coverUrl: pl.coverImgUrl || '', platform: nav.platform,
+              trackCount: pl.trackCount, creator: pl.creator,
+            })} />
+          )}
+          {!loading && tab === 'artists' && (
             <ul className="wf-m-pl-list">
-              {playlists.map(pl => (
-                <li key={pl.id}>
-                  <button type="button" className="wf-m-pl-row" onClick={() => nav.openPlaylist({
-                    id: pl.id, name: pl.name, coverUrl: pl.coverImgUrl || '', platform: nav.platform,
-                    trackCount: pl.trackCount, creator: pl.creator,
-                  })}>
-                    <Cover url={pl.coverImgUrl} size={180} rounded={10} />
+              {artists.map(a => (
+                <li key={`${a.id}`}>
+                  <button type="button" className="wf-m-pl-row" onClick={() => nav.openArtist({ id: String(a.id), name: a.name, platform: nav.platform })}>
+                    <Cover url={a.avatarUrl || a.picUrl} size={180} rounded={999} />
                     <span className="wf-m-pl-row-meta">
-                      <span className="wf-m-pl-row-name">{pl.name}</span>
-                      <span className="wf-m-pl-row-sub">
-                        {pl.trackCount ? `${pl.trackCount}首` : ''}{pl.creator ? ` · by ${pl.creator}` : ''}
-                      </span>
+                      <span className="wf-m-pl-row-name">{a.name}</span>
+                      <span className="wf-m-pl-row-sub">歌手{a.alias?.length ? ` · ${a.alias[0]}` : ''}</span>
                     </span>
                   </button>
                 </li>
               ))}
+              {!artists.length && <p className="wf-m-hint">没有匹配的歌手</p>}
             </ul>
           )}
-          {!loading && !songs.length && !playlists.length && <p className="wf-m-hint">没有找到「{submitted}」的相关内容</p>}
+          {!loading && tab === 'albums' && (
+            <ul className="wf-m-pl-list">
+              {albums.map(al => (
+                <li key={`${al.id}`}>
+                  <button type="button" className="wf-m-pl-row" onClick={() => nav.openAlbum({ id: String(al.id), name: al.name, coverUrl: al.picUrl, platform: nav.platform })}>
+                    <Cover url={al.picUrl} size={180} rounded={10} />
+                    <span className="wf-m-pl-row-meta">
+                      <span className="wf-m-pl-row-name">{al.name}</span>
+                      <span className="wf-m-pl-row-sub">{al.artist?.name || ''}{al.company ? ` · ${al.company}` : ''}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+              {!albums.length && <p className="wf-m-hint">没有匹配的专辑</p>}
+            </ul>
+          )}
+          {!loading && !songs.length && !playlists.length && !artists.length && !albums.length && (
+            <p className="wf-m-hint">没有找到「{submitted}」的相关内容</p>
+          )}
         </>
       )}
     </div>
+  )
+})
+
+const PlaylistResults = memo(function PlaylistResults({ playlists, onOpen }: {
+  playlists: PlaylistSearchResult['playlists']
+  onOpen: (pl: PlaylistSearchResult['playlists'][number]) => void
+}) {
+  if (!playlists.length) return <p className="wf-m-hint">没有匹配的歌单</p>
+  return (
+    <ul className="wf-m-pl-list">
+      {playlists.map(pl => (
+        <li key={pl.id}>
+          <button type="button" className="wf-m-pl-row" onClick={() => onOpen(pl)}>
+            <Cover url={pl.coverImgUrl} size={180} rounded={10} />
+            <span className="wf-m-pl-row-meta">
+              <span className="wf-m-pl-row-name">{pl.name}</span>
+              <span className="wf-m-pl-row-sub">
+                {pl.trackCount ? `${pl.trackCount}首` : ''}{pl.creator ? ` · by ${pl.creator}` : ''}
+              </span>
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
   )
 })
 

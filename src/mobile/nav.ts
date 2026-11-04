@@ -37,6 +37,16 @@ export interface MobileSongActionsTarget {
   listLabel?: string
 }
 
+/** 榜单详情目标（发现页榜单卡点进） */
+export interface MobileChartTarget {
+  id: string
+  name: string
+  coverUrl?: string
+  platform: MusicPlatform
+  /** 发现页已预取的前几首（详情页会拉全量，失败时兜底播放这些） */
+  songs?: Song[]
+}
+
 export interface MobileNavApi {
   /** 当前 tab（栈底页面） */
   tab: MobileTabKey
@@ -51,6 +61,8 @@ export interface MobileNavApi {
   openMv: (mv: MobileMvTarget) => void
   /** 长按歌曲 → 底部动作面板（触屏的右键菜单/轮盘） */
   openSongActions: (target: MobileSongActionsTarget) => void
+  /** 打开榜单详情页 */
+  openChart: (chart: MobileChartTarget) => void
   /** 打开全屏播放页 */
   openPlayer: () => void
   /** 当前音源平台 */

@@ -18,6 +18,7 @@ import {
 } from '../services/musicApi'
 import { platformLabel, type MusicPlatform } from '../services/platforms'
 import { likeSong } from '../services/playlistService'
+import { saveAudioQualitySettings, getAudioQualityPreference, type AudioQualityPreference } from '../services/audioQualitySettings'
 import {
   loadFavoriteIdentifiers, peekSongFavoriteStatus, applyFavoriteMutation, getFavoriteUserId,
 } from '../services/favoriteStatusService'
@@ -31,6 +32,7 @@ export type MobilePlayMode = 'list' | 'random' | 'single'
 export type MobileTransitionMode = 'cut' | 'crossfade' | 'gapless'
 const PLAY_MODE_ORDER: MobilePlayMode[] = ['list', 'random', 'single']
 const TRANSITION_KEY = 'waveforge:mobile-transition'
+const QUALITY_KEY = 'waveforge:mobile-audio-quality'
 
 const QUEUE_KEY = 'waveforge:mobile-queue'
 const VOLUME_KEY = 'waveforge:mobile-volume'
@@ -90,9 +92,50 @@ async function resolveTrackUrl(song: Song): Promise<string> {
     return getProxiedAudioUrl(info.url)
   }
   const id = platform === 'qq' ? (song.mid || song.id) : song.id
-  const raw = await getSongUrl(id, platform, 2, song)
+  // attemptLimit 传 1：重试档位交给 getSongUrl 内部的音质偏好（与 PC 同一事实源），
+  // 不再写死档位 2——移动端音质设置（PlayerSheet 音质面板）改档后立即生效。
+  const raw = await getSongUrl(id, platform, 1, song)
   if (!raw) throw new Error('无法获取播放链接（可能需要登录或版权受限）')
   return getProxiedAudioUrl(raw)
+}
+
+/** 移动端音质档位（独立于 PC 设置，localStorage 持久化；改档后下一首生效，当前曲不中断）。 */
+export function getMobileAudioQuality(platform: MusicPlatform): AudioQualityPreference {
+  try {
+    const v = localStorage.getItem(QUALITY_KEY)
+    const perPlatform = v ? (JSON.parse(v) as Record<string, AudioQualityPreference>) : null
+    const stored = perPlatform?.[platform]
+    if (stored) return stored
+  } catch { /* ignore */ }
+  // 未设置过：跟随 PC 全局音质设置（同一偏好事实源）
+  return getAudioQualityPreference(platform) as AudioQualityPreference
+}
+
+/** 设置移动端音质档位（null = 清除，回退跟随 PC 全局设置）。 */
+export function setMobileAudioQuality(platform: MusicPlatform, value: AudioQualityPreference | null): void {
+  try {
+    if (value == null) {
+      const perPlatform = readQualityMap()
+      delete perPlatform[platform]
+      localStorage.setItem(QUALITY_KEY, JSON.stringify(perPlatform))
+    } else {
+      const perPlatform = readQualityMap()
+      perPlatform[platform] = value
+      localStorage.setItem(QUALITY_KEY, JSON.stringify(perPlatform))
+      // 同步写 PC 全局设置（同设备同一偏好，播放引擎按全局偏好取流）
+      saveAudioQualitySettings({ [platform]: value } as Partial<import('../services/audioQualitySettings').AudioQualitySettings>)
+    }
+    window.dispatchEvent(new CustomEvent('waveforge:mobile-quality-changed', { detail: { platform, value } }))
+  } catch { /* ignore */ }
+}
+
+function readQualityMap(): Record<string, AudioQualityPreference> {
+  try {
+    const v = localStorage.getItem(QUALITY_KEY)
+    return v ? (JSON.parse(v) as Record<string, AudioQualityPreference>) : {}
+  } catch {
+    return {}
+  }
 }
 
 export interface MobilePlayerApi {
@@ -122,7 +165,19 @@ export interface MobilePlayerApi {
   /** 针对任意歌曲切喜欢（动作面板用；currentLike 为当前状态）。 */
   toggleFavoriteFor: (song: Song, currentLike: boolean) => Promise<void>
   removeAt: (index: number) => void
+  /** 队列内移动（上移/下移；涉及当前曲时同步 index）。 */
+  moveAt: (from: number, to: number) => void
   toggleFavorite: () => Promise<void>
+  /** 睡眠定时器：剩余毫秒（null = 未开启）。 */
+  sleepTimerEndsAt: number | null
+  /** 开启/取消睡眠定时（分钟数；0 或省略 = 取消）。到点暂停播放。 */
+  setSleepTimer: (minutes: number) => void
+  /** 清空整个队列（保留当前曲）。 */
+  clearQueue: () => void
+  /** 当前倍速（1 = 原速）。 */
+  audioRate: number
+  /** 设置倍速（切歌后自动归位 1）。 */
+  setAudioRate: (rate: number) => void
 }
 
 export interface MobileTimeApi {
@@ -178,6 +233,9 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
   // （爆音/杂音/进度条与听感不一致），且双流抢带宽卡顿；引擎侧 preloadNext 已 no-op。
   const [transitionMode, setTransitionModeState] = useState<MobileTransitionMode>('cut')
   const [favorite, setFavorite] = useState(false)
+  // 睡眠定时器：到点暂停（对齐 PC App.tsx 睡眠定时语义）
+  const [sleepTimerEndsAt, setSleepTimerEndsAt] = useState<number | null>(null)
+  const sleepTimerRef = useRef<number | null>(null)
 
   const queueRef = useRef(queue)
   queueRef.current = queue
@@ -417,6 +475,28 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
     }
   }, [loadAndPlayIndex])
 
+  // 队列内移动（桌面版 onMoveQueueItem 同语义）：当前曲跟随，未播区顺序变化
+  // 会影响后续播放顺序，但移动端是单流直切（无预载/过渡引擎），无需取消过渡。
+  const moveAt = useCallback((from: number, to: number) => {
+    const q = queueRef.current
+    if (from === to || from < 0 || to < 0 || from >= q.length || to >= q.length) return
+    const nextQueue = [...q]
+    const [moved] = nextQueue.splice(from, 1)
+    nextQueue.splice(to, 0, moved)
+    setQueue(nextQueue)
+    queueRef.current = nextQueue
+    const active = indexRef.current
+    // 当前曲索引跟随移动（与桌面 handleDesktopQueueMove 同公式）
+    const nextActive = active === from ? to
+      : from < active && to >= active ? active - 1
+      : from > active && to <= active ? active + 1
+      : active
+    if (nextActive !== active) {
+      indexRef.current = nextActive
+      setIndex(nextActive)
+    }
+  }, [])
+
   // ── 红心状态 ──
   useEffect(() => {
     const song = currentSong
@@ -619,8 +699,60 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
     mobileToast('已加入队列末尾', 'success')
   }, [loadAndPlayIndex])
 
-  const toggleFavoriteFor = useCallback(async (song: Song, currentLike: boolean) => {
-    const platform = (song.platform || 'netease') as MusicPlatform
+  // ── 倍速（用户倍速；走引擎统一入口 applyUserPlaybackSpeed，切歌后归位 1）──
+  const [audioRate, setAudioRateState] = useState(1)
+  const setAudioRate = useCallback((rate: number) => {
+    const clamped = Math.max(0.5, Math.min(2, rate))
+    setAudioRateState(clamped)
+    try {
+      const speed = (audioPlayerRef.current as unknown as { playbackSpeed?: { apply: (v: number) => void } }).playbackSpeed
+      speed?.apply(clamped)
+    } catch { /* 引擎不支持时静默 */ }
+  }, [])
+  // 切歌后归位原速
+  useEffect(() => { setAudioRateState(1) }, [currentSong])
+
+  // ── 睡眠定时器 ──
+  const setSleepTimer = useCallback((minutes: number) => {
+    if (sleepTimerRef.current !== null) {
+      window.clearTimeout(sleepTimerRef.current)
+      sleepTimerRef.current = null
+    }
+    if (!minutes || minutes <= 0) {
+      setSleepTimerEndsAt(null)
+      mobileToast('已取消睡眠定时')
+      return
+    }
+    const endsAt = Date.now() + minutes * 60_000
+    setSleepTimerEndsAt(endsAt)
+    mobileToast(`${minutes} 分钟后暂停播放`, 'success')
+    sleepTimerRef.current = window.setTimeout(() => {
+      sleepTimerRef.current = null
+      setSleepTimerEndsAt(null)
+      if (isPlayingRef.current) audioPlayerRef.current.togglePlay()
+      mobileToast('睡眠定时到点，已暂停播放')
+    }, minutes * 60_000)
+  }, [])
+
+  // 卸载清理
+  useEffect(() => () => {
+    if (sleepTimerRef.current !== null) window.clearTimeout(sleepTimerRef.current)
+  }, [])
+
+  // ── 清空队列（保留当前曲）──
+  const clearQueue = useCallback(() => {
+    const q = queueRef.current
+    if (!q.length) return
+    const keep = indexRef.current >= 0 && indexRef.current < q.length ? [q[indexRef.current]] : []
+    const keepIndex = keep.length ? 0 : -1
+    setQueue(keep)
+    queueRef.current = keep
+    setIndex(keepIndex)
+    indexRef.current = keepIndex
+    mobileToast(keep.length ? '已清空队列（保留当前曲）' : '队列已清空', 'success')
+  }, [])
+
+  const toggleFavoriteFor = useCallback(async (song: Song, currentLike: boolean) => {    const platform = (song.platform || 'netease') as MusicPlatform
     const userId = platformUserIdOf(platform)
     if (!userId) { mobileToast(`请先登录${platformLabel(platform)}`, 'error'); return }
     try {
@@ -648,10 +780,10 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
     playMode, transitionMode, contextLabel, favorite,
     playSongs, playAt, toggle, next: () => advanceRef.current(false), prev: previous, seekTo,
     changeVolume, cyclePlayMode, setTransitionMode, insertNext, appendToQueue, toggleFavoriteFor,
-    removeAt, toggleFavorite,
+    removeAt, moveAt, toggleFavorite, sleepTimerEndsAt, setSleepTimer, clearQueue, audioRate, setAudioRate,
   }), [queue, index, currentSong, isPlaying, duration, volume, playMode, transitionMode, contextLabel,
     favorite, playSongs, playAt, toggle, previous, seekTo, changeVolume, cyclePlayMode, setTransitionMode,
-    insertNext, appendToQueue, toggleFavoriteFor, removeAt, toggleFavorite])
+    insertNext, appendToQueue, toggleFavoriteFor, removeAt, moveAt, toggleFavorite, sleepTimerEndsAt, setSleepTimer, clearQueue, audioRate, setAudioRate])
 
   const timeApi = useMemo(() => ({ currentTime, isBuffering }), [currentTime, isBuffering])
 

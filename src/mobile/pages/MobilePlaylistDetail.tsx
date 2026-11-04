@@ -11,8 +11,11 @@ import { useMobileNav } from '../nav'
 import { triggerMobileBack } from '../mobileBack'
 import { useMobilePlayer } from '../mobilePlayer'
 import { useLongPress } from '../MobileActionSheet'
+import { subscribePlaylist, removeSongFromPlaylist } from '../../services/playlistService'
+import { useAccounts } from '../mobileLogin'
+import { mobileToast } from '../ui'
 import {
-  Cover, ErrorRetry, IconChevronLeft, IconPlay, IconPause, Spinner, songArtists, useLazyList,
+  Cover, ErrorRetry, IconChevronLeft, IconHeart, IconHeartFilled, IconPlay, IconPause, Spinner, songArtists, useLazyList,
 } from '../ui'
 
 export default memo(function MobilePlaylistDetail({ playlist, album }: {
@@ -63,6 +66,51 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
   const title = detail?.playlist.name || album?.name || playlist?.name || ''
   const cover = detail?.playlist.coverImgUrl || album?.coverUrl || playlist?.coverUrl
   const activeKey = (song: { id?: number; mid?: string; platform?: string }) => `${song.platform || ''}:${song.mid || song.id}`
+  // 收藏/取消收藏（仅歌单模式；登录态从 useAccounts 取）
+  const { accounts } = useAccounts()
+  const account = accounts[nav.platform]
+  const [subscribed, setSubscribed] = useState<boolean | null>(null)
+  useEffect(() => {
+    // ExplorePlaylist 未透传 subscribed 状态：仅在有登录态时展示收藏按钮，初始视为未收藏
+    setSubscribed(account?.loggedIn && !album ? false : null)
+  }, [account?.loggedIn, album])
+  const [subBusy, setSubBusy] = useState(false)
+  const toggleSubscribe = useCallback(async () => {
+    if (!playlist || subBusy || !account?.userId) return
+    setSubBusy(true)
+    try {
+      await subscribePlaylist(String(playlist.id), !subscribed, nav.platform)
+      setSubscribed(prev => !prev)
+      mobileToast(subscribed ? '已取消收藏' : '已收藏歌单', 'success')
+    } catch (err) {
+      mobileToast(err instanceof Error ? err.message : '收藏失败', 'error')
+    } finally {
+      setSubBusy(false)
+    }
+  }, [playlist, subBusy, account?.userId, subscribed, nav.platform])
+  // 从歌单移除（本人歌单内的歌曲行，长按菜单扩展项）——详情页内 songs 全量重载太重，
+  // 直接本地移除该行并广播 playlist-content-changed。
+  const [removedKeys, setRemovedKeys] = useState<Set<string>>(new Set())
+  const removeSong = useCallback(async (song: Song) => {
+    if (!playlist || !account?.userId) return
+    try {
+      await removeSongFromPlaylist(
+        String(playlist.id),
+        String(song.platform === 'qq' ? (song.mid || song.id) : song.id),
+        account.userId,
+        nav.platform,
+        { songMid: song.mid },
+      )
+      const key = activeKey(song)
+      setRemovedKeys(prev => new Set(prev).add(key))
+      window.dispatchEvent(new CustomEvent('playlist-content-changed', {
+        detail: { platform: nav.platform, type: 'remove', songId: song.id, songMid: song.mid, playlistId: playlist.id },
+      }))
+      mobileToast('已从歌单移除', 'success')
+    } catch (err) {
+      mobileToast(err instanceof Error ? err.message : '移除失败（可能不是本人歌单）', 'error')
+    }
+  }, [playlist, account?.userId, nav.platform])
 
   return (
     <div className="wf-m-page wf-m-pl-page">
@@ -102,6 +150,18 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
               : <IconPlay size={16} />}
             播放全部{songs.length ? ` (${songs.length})` : ''}
           </button>
+          {subscribed !== null && (
+            <button
+              type="button"
+              className={`wf-m-btn wf-m-btn-sub ${subscribed ? 'is-on' : ''}`}
+              disabled={subBusy}
+              aria-label={subscribed ? '取消收藏' : '收藏歌单'}
+              onClick={() => void toggleSubscribe()}
+            >
+              {subscribed ? <IconHeartFilled size={16} /> : <IconHeart size={16} />}
+              {subscribed ? '已收藏' : '收藏'}
+            </button>
+          )}
         </div>
       </header>
 
@@ -113,14 +173,18 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
         <>
           <ul className="wf-m-song-list">
             {songs.slice(0, visible).map((song, i) => (
-              <DetailSongRow
-                key={`${song.platform || ''}-${song.id ?? song.mid}-${i}`}
-                song={song}
-                index={i}
-                songs={songs}
-                label={title}
-                nav={nav}
-              />
+              removedKeys.has(activeKey(song)) ? null : (
+                <DetailSongRow
+                  key={`${song.platform || ''}-${song.id ?? song.mid}-${i}`}
+                  song={song}
+                  index={i}
+                  songs={songs}
+                  label={title}
+                  nav={nav}
+                  playlistId={playlist && !album ? String(playlist.id) : undefined}
+                  onRemoveFromPlaylist={playlist && !album && account?.userId ? () => void removeSong(song) : undefined}
+                />
+              )
             ))}
           </ul>
           <div ref={sentinelRef} />
@@ -131,17 +195,29 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
 })
 
 const DetailSongRow = memo(function DetailSongRow({
-  song, index, songs, label, nav,
+  song, index, songs, label, nav, playlistId, onRemoveFromPlaylist,
 }: {
   song: Song
   index: number
   songs: Song[]
   label: string
   nav: ReturnType<typeof useMobileNav>
+  /** 所在歌单 id（提供时打开扩展动作：从歌单移除） */
+  playlistId?: string
+  onRemoveFromPlaylist?: () => void
 }) {
   const player = useMobilePlayer()
   const isActive = player.currentSong && `${player.currentSong.platform || ''}:${player.currentSong.mid || player.currentSong.id}` === `${song.platform || ''}:${song.mid || song.id}`
-  const longPress = useLongPress(() => nav.openSongActions({ song, list: songs, listLabel: label }))
+  // 长按 → 动作面板；歌单模式扩展「从歌单移除」：先开面板，再由面板 toast 确认执行
+  const longPress = useLongPress(() => {
+    nav.openSongActions({ song, list: songs, listLabel: label })
+    if (onRemoveFromPlaylist && playlistId) {
+      // 动作面板关闭后延迟弹出确认（避免面板和 confirm 同帧争抢）
+      window.setTimeout(() => {
+        if (window.confirm(`把「${song.name}」从歌单移除？`)) onRemoveFromPlaylist()
+      }, 120)
+    }
+  })
   return (
     <li>
       <button

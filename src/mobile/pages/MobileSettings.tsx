@@ -14,6 +14,11 @@ import { useAccounts, mobileLogout, mobileQQLogin, mobileNeteaseLogin, mobileKug
 import { isMobilePlayablePlatform, useMobilePlayer } from '../mobilePlayer'
 import { getDebugBridgeToken } from '../../tv/debugRemote'
 import { getMobileEffectsScene, setMobileEffectsScene, subscribeMobileEffects } from '../mobileEffects'
+import { getKeepScreenOn, setKeepScreenOn } from '../../services/keepScreenOn'
+import {
+  getModeTransitionStyle, setModeTransitionStyle, isModeTransitionSoundEnabled, setModeTransitionSoundEnabled,
+  MODE_TRANSITION_STYLE_EVENT, MODE_TRANSITION_SOUND_EVENT, type ModeTransitionStyle,
+} from '../../services/modeTransitionSettings'
 import { useEffect as useReactEffect } from 'react'
 import {
   IconChevronRight, IconClose, IconHeartFilled, IconRefresh, IconUser, IconVolume,
@@ -21,9 +26,10 @@ import {
 } from '../ui'
 
 const LoginView = lazy(() => import('../../components/LoginView'))
+const CacheClearModal = lazy(() => import('../../components/CacheClearModal'))
 
 type LoginTarget = MusicPlatform | null
-type SettingsSection = 'account' | 'playback' | 'appearance' | 'about'
+type SettingsSection = 'account' | 'playback' | 'appearance' | 'advanced' | 'about'
 
 function readDeveloperMode(): boolean {
   try {
@@ -47,7 +53,31 @@ export default memo(function MobileSettings() {
   const [developerMode, setDeveloperMode] = useState<boolean>(readDeveloperMode)
   const [debugToken, setDebugToken] = useState('')
   const [effectsScene, setEffectsScene] = useState<string>(getMobileEffectsScene)
+  // App 内不熄屏（默认开；原生桥 setKeepScreenOn 实际生效）
+  const [keepScreenOn, setKeepScreenOnState] = useState<boolean>(getKeepScreenOn)
+  const setKeepScreenOn = (v: boolean) => setKeepScreenOnState(v)
   const [effectsScenes, setEffectsScenes] = useState<Array<{ id: string; name: string; description?: string }>>([])
+  // 外观主题（与 PC 同一 localStorage 键 + html[data-wf-theme]，App.tsx 同款语义）
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('playerTheme') === 'light' ? 'light' : 'dark'))
+  // ── 高级页签状态（键与 PC SettingsPanel 同源，改动即广播同款事件，多端语义一致）──
+  // 转场动画：complex（Steam 风格描边）/ simple（轻量徽章）
+  const [transitionStyle, setTransitionStyleState] = useState<ModeTransitionStyle>(getModeTransitionStyle)
+  const [transitionSound, setTransitionSoundState] = useState<boolean>(isModeTransitionSoundEnabled)
+  // 即将播放提示：歌曲结束前显示下一首信息
+  const [upNextEnabled, setUpNextEnabledState] = useState<boolean>(() => localStorage.getItem('upNextEnabled') !== 'false')
+  const [upNextSeconds, setUpNextSecondsState] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('upNextTime'))
+    return Number.isFinite(saved) && saved >= 5 ? Math.min(30, saved) : 15
+  })
+  // 首要歌词库（第三方歌词源）：与 PC 同键 + 同步事件
+  const [primaryLyricsSource, setPrimaryLyricsSourceState] = useState<string>(() => localStorage.getItem('primaryLyricsSource') || 'AMLL')
+  const [showCacheClear, setShowCacheClear] = useState(false)
+  const pickTheme = useCallback((t: 'dark' | 'light') => {
+    setTheme(t)
+    try { localStorage.setItem('playerTheme', t) } catch { /* ignore */ }
+    document.documentElement.dataset.wfTheme = t
+    mobileToast(t === 'light' ? '已切换浅色主题' : '已切换深色主题')
+  }, [])
 
   // 音效场景列表在音频图就绪后（引擎创建）才有：订阅变化刷新
   useReactEffect(() => {
@@ -58,6 +88,45 @@ export default memo(function MobileSettings() {
     }
     refresh()
     return subscribeMobileEffects(refresh)
+  }, [])
+
+  // 高级设置与 PC 双向同步：桌面树（pc-touch）改了这里要跟上
+  useReactEffect(() => {
+    const onStyle = () => setTransitionStyleState(getModeTransitionStyle())
+    const onSound = () => setTransitionSoundState(isModeTransitionSoundEnabled())
+    window.addEventListener(MODE_TRANSITION_STYLE_EVENT, onStyle)
+    window.addEventListener(MODE_TRANSITION_SOUND_EVENT, onSound)
+    return () => {
+      window.removeEventListener(MODE_TRANSITION_STYLE_EVENT, onStyle)
+      window.removeEventListener(MODE_TRANSITION_SOUND_EVENT, onSound)
+    }
+  }, [])
+
+  const pickTransitionStyle = useCallback((style: ModeTransitionStyle) => {
+    setModeTransitionStyle(style)
+    setTransitionStyleState(style)
+    mobileToast(style === 'complex' ? '转场动画：复杂' : '转场动画：简易')
+  }, [])
+  const toggleTransitionSound = useCallback((enabled: boolean) => {
+    setModeTransitionSoundEnabled(enabled)
+    setTransitionSoundState(enabled)
+  }, [])
+  const toggleUpNext = useCallback((enabled: boolean) => {
+    setUpNextEnabledState(enabled)
+    try { localStorage.setItem('upNextEnabled', JSON.stringify(enabled)) } catch { /* ignore */ }
+    window.dispatchEvent(new Event('upNextEnabledChanged'))
+  }, [])
+  const changeUpNextSeconds = useCallback((seconds: number) => {
+    if (!Number.isFinite(seconds)) return
+    const clamped = Math.max(5, Math.min(30, Math.round(seconds)))
+    setUpNextSecondsState(clamped)
+    try { localStorage.setItem('upNextTime', String(clamped)) } catch { /* ignore */ }
+    window.dispatchEvent(new Event('upNextTimeChanged'))
+  }, [])
+  const pickPrimaryLyricsSource = useCallback((key: string) => {
+    setPrimaryLyricsSourceState(key)
+    try { localStorage.setItem('primaryLyricsSource', key) } catch { /* ignore */ }
+    window.dispatchEvent(new Event('waveforge:lyrics-policy-changed'))
   }, [])
 
   // 开发者模式开启后轮询取配对令牌（debugRemote 异步从后端拿）
@@ -120,9 +189,9 @@ export default memo(function MobileSettings() {
       <header className="wf-m-header"><div className="wf-m-header-title">设置</div></header>
 
       <div className="wf-m-tabs">
-        {(['account', 'playback', 'appearance', 'about'] as const).map(s => (
+        {(['account', 'playback', 'appearance', 'advanced', 'about'] as const).map(s => (
           <button key={s} type="button" className={`wf-m-tab ${section === s ? 'is-on' : ''}`} onClick={() => setSection(s)}>
-            {s === 'account' ? '平台与账号' : s === 'playback' ? '播放' : s === 'appearance' ? '外观' : '关于'}
+            {s === 'account' ? '平台与账号' : s === 'playback' ? '播放' : s === 'appearance' ? '外观' : s === 'advanced' ? '高级' : '关于'}
           </button>
         ))}
       </div>
@@ -174,6 +243,23 @@ export default memo(function MobileSettings() {
 
       {section === 'playback' && (
         <div className="wf-m-cards">
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">App 内不熄屏</span>
+                <span className="wf-m-card-sub">
+                  浏览/听歌时屏幕保持常亮（锁屏键和切后台不受影响）。默认开启。
+                </span>
+              </span>
+              <button
+                type="button"
+                className={`wf-m-btn ${keepScreenOn ? 'wf-m-btn-primary' : ''}`}
+                onClick={() => { const next = !keepScreenOn; setKeepScreenOn(next); setKeepScreenOnState(next); }}
+              >
+                {keepScreenOn ? '已开启' : '已关闭'}
+              </button>
+            </div>
+          </div>
           <div className="wf-m-card">
             <div className="wf-m-card-row">
               <span className="wf-m-card-main">
@@ -250,8 +336,139 @@ export default memo(function MobileSettings() {
         </div>
       )}
 
+      {section === 'advanced' && (
+        <div className="wf-m-cards">
+          {/* 转场动画（与 PC 同键同事件） */}
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">转场动画</span>
+                <span className="wf-m-card-sub">切换模式时的过渡效果（与桌面端同键同步）</span>
+              </span>
+            </div>
+            <div className="wf-m-scene-picker">
+              {([['complex', '复杂（描边动画）'], ['simple', '简易（徽章）']] as Array<[ModeTransitionStyle, string]>).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`wf-m-btn ${transitionStyle === value ? 'wf-m-btn-primary' : ''}`}
+                  onClick={() => pickTransitionStyle(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="wf-m-card-row" style={{ marginTop: 8 }}>
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-sub">切换模式时播放过渡音效</span>
+              </span>
+              <button
+                type="button"
+                className={`wf-m-btn ${transitionSound ? 'wf-m-btn-primary' : ''}`}
+                onClick={() => toggleTransitionSound(!transitionSound)}
+              >
+                {transitionSound ? '已开启' : '已关闭'}
+              </button>
+            </div>
+          </div>
+
+          {/* 即将播放提示（与 PC 同键） */}
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">即将播放提示</span>
+                <span className="wf-m-card-sub">歌曲结束前显示下一首歌曲信息</span>
+              </span>
+              <button
+                type="button"
+                className={`wf-m-btn ${upNextEnabled ? 'wf-m-btn-primary' : ''}`}
+                onClick={() => toggleUpNext(!upNextEnabled)}
+              >
+                {upNextEnabled ? '已开启' : '已关闭'}
+              </button>
+            </div>
+            {upNextEnabled && (
+              <div className="wf-m-card-row" style={{ marginTop: 8 }}>
+                <span className="wf-m-card-main">
+                  <span className="wf-m-card-sub">提前 {upNextSeconds} 秒显示</span>
+                </span>
+                <input
+                  className="wf-m-slider"
+                  type="range" min={5} max={30} step={1}
+                  value={upNextSeconds}
+                  onChange={e => changeUpNextSeconds(Number(e.target.value))}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* 首要歌词库（第三方歌词源，与 PC 同键） */}
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">首要歌词库</span>
+                <span className="wf-m-card-sub">优先使用有逐字的歌词来源</span>
+              </span>
+            </div>
+            <div className="wf-m-scene-picker">
+              {([
+                ['AMLL', 'AMLL 逐字库'],
+                ['Apple Music', 'Apple Music'],
+                ['NetEase', '网易云'],
+                ['QQMusic', 'QQ音乐'],
+                ['Platform', '当前平台'],
+              ] as Array<[string, string]>).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`wf-m-btn ${primaryLyricsSource === key ? 'wf-m-btn-primary' : ''}`}
+                  onClick={() => pickPrimaryLyricsSource(key)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 缓存清理（复用 PC 的 CacheClearModal） */}
+          <div className="wf-m-card">
+            <div className="wf-m-card-row" onClick={() => setShowCacheClear(true)} style={{ cursor: 'pointer' }}>
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">缓存清理</span>
+                <span className="wf-m-card-sub">管理封面、歌单列表和错误日志缓存</span>
+              </span>
+              <IconChevronRight size={16} />
+            </div>
+          </div>
+        </div>
+      )}
+
       {section === 'appearance' && (
         <div className="wf-m-cards">
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">外观主题</span>
+                <span className="wf-m-card-sub">跟随系统时间手动切换；PC 端共用同一偏好</span>
+              </span>
+            </div>
+            <div className="wf-m-layout-picker">
+              <button
+                type="button"
+                className={`wf-m-btn ${theme === 'dark' ? 'wf-m-btn-primary' : ''}`}
+                onClick={() => pickTheme('dark')}
+              >
+                🌙 深色
+              </button>
+              <button
+                type="button"
+                className={`wf-m-btn ${theme === 'light' ? 'wf-m-btn-primary' : ''}`}
+                onClick={() => pickTheme('light')}
+              >
+                ☀️ 浅色
+              </button>
+            </div>
+          </div>
           <div className="wf-m-card">
             <div className="wf-m-card-row">
               <span className="wf-m-card-main">
@@ -424,6 +641,12 @@ export default memo(function MobileSettings() {
             </div>
           </div>
         </div>
+      )}
+      {/* 缓存清理（PC 同款组件：封面/歌单列表/错误日志分类清理） */}
+      {showCacheClear && (
+        <Suspense fallback={null}>
+          <CacheClearModal show={showCacheClear} onClose={() => setShowCacheClear(false)} playerTheme={theme} />
+        </Suspense>
       )}
     </div>
   )

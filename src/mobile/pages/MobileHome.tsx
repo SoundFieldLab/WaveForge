@@ -178,7 +178,7 @@ function hasAnyContent(payload: ExplorePayload | null): boolean {
   )
 }
 
-/** 榜单大卡：封面做底 + 渐变遮罩 + 前三名预览（官方排行榜入口卡）。 */
+/** 榜单大卡：封面做底 + 渐变遮罩 + 前三名预览（官方排行榜入口卡）。点进榜单详情页。 */
 const ChartBannerCard = memo(function ChartBannerCard({ chart }: { chart: ExploreChart }) {
   const player = useMobilePlayer()
   const nav = useMobileNav()
@@ -189,16 +189,19 @@ const ChartBannerCard = memo(function ChartBannerCard({ chart }: { chart: Explor
       className="wf-m-chart-banner"
       style={imgOk && chart.coverUrl ? { backgroundImage: `url(${chart.coverUrl})` } : undefined}
       onClick={() => {
-        if (chart.songs?.length) {
-          player.playSongs(chart.songs.map(s => ({
+        // 主按钮 = 进榜单详情页（完整曲目列表）；有预取曲目时详情页可直接播放
+        nav.openChart({
+          id: chart.id,
+          name: chart.name,
+          coverUrl: chart.coverUrl,
+          platform: chart.platform,
+          songs: (chart.songs || []).map(s => ({
             id: s.id ?? 0, mid: s.mid, appleId: s.appleId, name: s.name,
             artists: s.artist ? [{ name: s.artist }] : [],
             album: { name: '', picUrl: s.coverUrl || '' },
             duration: (s.duration || 0) * 1000, platform: chart.platform,
-          })), 0, chart.name)
-        } else {
-          nav.openPlaylist({ id: chart.id, name: chart.name, coverUrl: chart.coverUrl, platform: chart.platform })
-        }
+          } as import('../../services/musicApi').Song)),
+        })
       }}
     >
       <span className="wf-m-chart-banner-mask" />

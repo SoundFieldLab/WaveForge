@@ -177,6 +177,14 @@ html.mobile-mode ::-webkit-scrollbar {
   margin: 0 auto;
   width: 100%;
   animation: wf-m-fadein 0.22s ease;
+  /* ── 播放中切页降载（安卓爆音/变速对策）──
+     contain: content 让浏览器跳过页外子树的布局/绘制计算；内容可见性使滚出
+     视口的封面/列表不参与合成。切页时全页重排范围从整树缩到视口内可见节点
+     ——渲染峰值骤降，音频 worklet 不再被 UI 线程挤压掉帧（8gen3 实测症状：
+     播放中回主页/开界面 → 爆音 + 减速/加速感）。 */
+  contain: content;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 100vh;
 }
 @keyframes wf-m-fadein {
   from { opacity: 0; transform: translateY(6px); }
@@ -414,6 +422,15 @@ html.mobile-mode ::-webkit-scrollbar {
   width: 100% !important;
   height: 100% !important;
   object-fit: cover;
+}
+/* CachedImage 自带一层包装 div（relative overflow-hidden）：上面的 absolute 规则
+   会把它内部的 img 拉出走流布局，而该包装自身无高度 → 图片容器塌陷为 0（封面全空）。
+   让包装层铺满外层 .wf-m-cover（其尺寸由调用处 aspect-ratio/定高决定），img 继续绝对填充。 */
+.wf-m-cover > div.relative.overflow-hidden,
+.wf-m-cover .cached-image {
+  position: absolute;
+  inset: 0;
+  height: 100%;
 }
 .wf-m-cover-fallback {
   position: absolute;
@@ -927,6 +944,12 @@ html.mobile-mode ::-webkit-scrollbar {
 }
 .wf-m-queue-sub { font-size: 11.5px; color: var(--wf-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wf-m-queue-remove { color: var(--wf-text-3); padding: 13px; display: inline-flex; }
+
+/* 队列行内 上移/下移/移除 动作组（上移/下移为 2026-11-05 新增，与桌面 onMoveQueueItem 同语义） */
+.wf-m-queue-actions { display: inline-flex; align-items: center; }
+.wf-m-queue-move { color: var(--wf-text-3); padding: 13px 8px; display: inline-flex; }
+.wf-m-queue-move:first-child { padding-left: 13px; }
+.wf-m-queue-move:active { color: var(--wf-accent, #38bdf8); }
 
 /* ── 外观：平板布局风格选择 ── */
 .wf-m-layout-picker {
@@ -1543,4 +1566,310 @@ html.mobile-mode ::-webkit-scrollbar {
   flex-wrap: wrap;
   gap: 8px;
   padding: 2px 0 14px;
+}
+
+/* ── 播放页「更多」面板（音质/音效/倍速/睡眠定时）── */
+.wf-m-more {
+  max-height: 70%;
+  z-index: 3;
+}
+.wf-m-more-body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 16px 16px;
+}
+.wf-m-more-group { margin-top: 14px; }
+.wf-m-more-group:first-child { margin-top: 4px; }
+.wf-m-more-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--wf-text-sub, #8ca0b8);
+  margin-bottom: 8px;
+}
+.wf-m-more-timer { color: var(--wf-accent, #ff5b6e); font-variant-numeric: tabular-nums; }
+.wf-m-chip.is-on {
+  background: var(--wf-accent, #ff5b6e);
+  color: #fff;
+  border-color: transparent;
+}
+.wf-m-queue-foot {
+  border-top: 1px solid var(--wf-line);
+  padding: 8px 16px 12px;
+}
+.wf-m-queue-clear {
+  width: 100%;
+  padding: 10px 0;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 91, 110, 0.12);
+  color: var(--wf-accent, #ff5b6e);
+  font-size: 14px;
+}
+.wf-m-queue-clear:active { background: rgba(255, 91, 110, 0.22); }
+
+/* 迷你条三键（上一首/播放/下一首）布局适配 */
+.wf-m-mini { gap: 2px; }
+.wf-m-mini-btn { flex: none; }
+
+/* ── 移动端表单（新建歌单等）── */
+.wf-m-form-body { padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+.wf-m-form-input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--wf-line);
+  background: var(--wf-card, rgba(255,255,255,0.06));
+  color: var(--wf-text, #e8eef5);
+  font-size: 15px;
+  outline: none;
+}
+.wf-m-form-input:focus { border-color: var(--wf-accent, #ff5b6e); }
+
+/* ── 榜单详情页头图 ── */
+.wf-m-chartdetail-head {
+  position: relative;
+  min-height: 200px;
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+.wf-m-chartdetail-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(10,13,19,0.25) 0%, rgba(10,13,19,0.88) 78%);
+}
+.wf-m-chartdetail-back {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  background: rgba(10, 13, 19, 0.5);
+}
+.wf-m-chartdetail-meta {
+  position: relative;
+  z-index: 1;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wf-m-chartdetail-title { font-size: 22px; font-weight: 700; color: #fff; }
+.wf-m-chartdetail-sub { font-size: 12px; color: rgba(255,255,255,0.7); }
+.wf-m-chartdetail-playall {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* ── 热评面板 ── */
+.wf-m-comments { max-height: 76%; }
+.wf-m-comments-list {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 16px 12px;
+}
+.wf-m-comment {
+  display: flex;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--wf-line);
+}
+.wf-m-comment:last-child { border-bottom: none; }
+.wf-m-comment-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--wf-card);
+}
+.wf-m-comment-body { min-width: 0; flex: 1; }
+.wf-m-comment-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.wf-m-comment-name { font-size: 12px; color: var(--wf-text-sub, #8ca0b8); }
+.wf-m-comment-like { font-size: 11px; color: var(--wf-text-sub, #8ca0b8); flex: none; }
+.wf-m-comment-text { margin: 4px 0 2px; font-size: 14px; line-height: 1.5; color: var(--wf-text, #e8eef5); word-break: break-word; }
+.wf-m-comment-time { font-size: 10px; color: var(--wf-text-sub, #8ca0b8); opacity: 0.7; }
+
+/* ── 播放页更多面板：并排按钮行 ── */
+.wf-m-more-row { display: flex; gap: 10px; }
+.wf-m-more-row .wf-m-btn { flex: 1; }
+.wf-m-btn-ghost {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--wf-text, #e8eef5);
+}
+.wf-m-btn-ghost:active { background: rgba(255, 255, 255, 0.16); }
+
+/* ── 歌词设置按钮（歌词视图右上角悬浮）── */
+.wf-m-lyric-settings-btn {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.wf-m-lyric-settings-btn:active { background: rgba(255, 255, 255, 0.18); }
+
+/* ── 歌单详情收藏按钮 ── */
+.wf-m-pl-actions { display: flex; gap: 10px; align-items: center; }
+.wf-m-btn-sub {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  height: 40px;
+  border: 1px solid var(--wf-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--wf-text, #e8eef5);
+  font-size: 13px;
+}
+.wf-m-btn-sub.is-on { border-color: var(--wf-accent, #ff5b6e); color: var(--wf-accent, #ff5b6e); }
+.wf-m-btn-sub:active { background: rgba(255, 255, 255, 0.08); }
+
+/* ── 歌曲详情行 ── */
+.wf-m-detail-rows { padding: 8px 16px 12px; }
+.wf-m-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--wf-line);
+  font-size: 14px;
+}
+.wf-m-detail-row:last-child { border-bottom: none; }
+.wf-m-detail-key { color: var(--wf-text-sub, #8ca0b8); flex: none; }
+.wf-m-detail-val { color: var(--wf-text, #e8eef5); text-align: right; word-break: break-all; }
+
+/* 歌词容器需要 relative 承载设置按钮 */
+.wf-m-lyrics { position: relative; }
+
+/* ═══════════════════════════════════════════════════════════════
+   交互手感统一升级（触屏反馈/过渡动画/回弹）
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── 1. 通用按压缩放反馈：所有可点元素按下轻微缩放 + 变暗，松手弹性恢复 ──
+   官方 App 手感的核心：按下有"陷进去"的感觉。只对按钮/行生效，滑块除外。 */
+.wf-m-root button,
+.wf-m-root [role='button'] {
+  transition: transform 0.12s ease, opacity 0.12s ease, filter 0.12s ease, background-color 0.15s ease;
+  will-change: auto;
+}
+.wf-m-root button:active,
+.wf-m-root [role='button']:active {
+  transform: scale(0.975);
+  filter: brightness(0.9);
+}
+/* 主要操作按钮（主色/胶囊）按压更明显 */
+.wf-m-root .wf-m-btn:active,
+.wf-m-root .wf-m-ctl-main:active,
+.wf-m-root .wf-m-chip:active {
+  transform: scale(0.955);
+}
+/* 迷你条整体按压：轻微下沉 */
+.wf-m-mini:active {
+  background: rgba(255, 255, 255, 0.04);
+}
+.wf-m-mini-cover { transition: transform 0.2s ease; }
+.wf-m-mini:active .wf-m-mini-cover { transform: scale(0.96); }
+/* 歌单卡/歌曲行按压：封面轻微放大（官方客户端同款） */
+.wf-m-pl-card .wf-m-cover { transition: transform 0.18s ease; }
+.wf-m-pl-card:active .wf-m-cover { transform: scale(0.95); }
+/* tab 按压：图标弹一下 */
+.wf-m-tabbar-btn:active { transform: scale(0.9); opacity: 0.85; }
+.wf-m-tabbar-btn svg { transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.wf-m-tabbar-btn.is-on svg { transform: translateY(-1px); }
+
+/* ── 2. 页面栈 push/pop 过渡：详情页进入 = 右侧滑入 + 旧页微缩（官方手感）──
+   StackRenderer 按 key 挂载新页，进出场动画由 CSS animation 驱动。 */
+.wf-m-pl-page,
+.wf-m-chartdetail-head,
+.wf-m-page[data-page-enter] {
+  animation: wf-m-page-push 0.26s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+@keyframes wf-m-page-push {
+  from { transform: translateX(14%); opacity: 0.35; }
+  to { transform: none; opacity: 1; }
+}
+
+/* ── 3. 弹层关闭动画：JS 关闭是瞬间卸载，改用两层结构感知 ——
+   mask 关闭时由 JS 加 .is-closing（见 MobileApp/PlayerSheet 的 useClosing hook），
+   播放退出动画后再真卸载。CSS 这边定义退出形态。 */
+.wf-m-sheet-mask.is-closing {
+  animation: wf-m-fadeout 0.18s ease forwards;
+  pointer-events: none;
+}
+.wf-m-sheet-mask.is-closing .wf-m-actionsheet,
+.wf-m-sheet-mask.is-closing .wf-m-queue,
+.wf-m-sheet-mask.is-closing .wf-m-more {
+  animation: wf-m-slidedown 0.2s ease forwards;
+}
+@keyframes wf-m-fadeout {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes wf-m-slidedown {
+  from { transform: none; }
+  to { transform: translateY(100%); }
+}
+
+/* ── 4. 底部导航/迷你条浮层：加轻投影与玻璃感层次（内容滚过下方时区分层）── */
+.wf-m-bottom-dock {
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* ── 5. 长按中的视觉暗示：按下 300ms 后轻微高亮（配合 450ms 触发长按）── */
+.wf-m-song-mini.is-longing {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ── 6. 播放页下滑关闭：松手回弹动画（dragY 从>0 归 0 时JS 会清 transform，
+   这里给 transition 兜底平滑）── */
+.wf-m-sheet {
+  transition: transform 0.24s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+.wf-m-sheet.is-dragging {
+  transition: none;
+}
+
+/* ── 7. 搜索页 tab 切换下划线滑动 ── */
+.wf-m-tab {
+  position: relative;
+}
+.wf-m-tab::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -2px;
+  width: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--wf-accent);
+  transform: translateX(-50%);
+  transition: width 0.2s ease;
+}
+.wf-m-tab.is-on::after { width: 24px; }
+
+/* ── 8. tost 进出场 ── */
+.wf-m-toast {
+  animation: wf-m-toast-in 0.22s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+@keyframes wf-m-toast-in {
+  from { transform: translateY(-12px); opacity: 0; }
+  to { transform: none; opacity: 1; }
 }

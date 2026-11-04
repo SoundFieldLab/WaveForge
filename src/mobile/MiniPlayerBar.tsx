@@ -3,7 +3,7 @@
  */
 import { memo } from 'react'
 import { useMobilePlayer, useMobileTime } from './mobilePlayer'
-import { IconNext, IconPause, IconPlay, songCoverUrl, songArtists } from './ui'
+import { IconNext, IconPause, IconPlay, IconPrev, songCoverUrl, songArtists } from './ui'
 
 export default memo(function MiniPlayerBar({ onOpen }: { onOpen: () => void }) {
   const player = useMobilePlayer()
@@ -23,6 +23,14 @@ export default memo(function MiniPlayerBar({ onOpen }: { onOpen: () => void }) {
           <span className="wf-m-mini-title">{song.name}</span>
           <span className="wf-m-mini-sub">{songArtists(song)}</span>
         </span>
+      </button>
+      <button
+        type="button"
+        className="wf-m-iconbtn wf-m-mini-btn"
+        aria-label="上一首"
+        onClick={() => player.prev()}
+      >
+        <IconPrev size={20} />
       </button>
       <button
         type="button"

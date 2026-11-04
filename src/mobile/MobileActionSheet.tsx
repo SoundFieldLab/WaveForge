@@ -8,39 +8,59 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { Song } from '../services/musicApi'
-import { getSimilarSongs, getMVPlaybackInfo } from '../services/musicApi'
+import { getSimilarSongs, getMVPlaybackInfo, neteaseRecommendDislike } from '../services/musicApi'
 import { platformLabel, type MusicPlatform } from '../services/platforms'
+import { toggleQQDislike } from '../features/qqExplore/qqDislike'
 import { peekSongFavoriteStatus } from '../services/favoriteStatusService'
 import { useMobilePlayer } from './mobilePlayer'
 import { useMobileBack } from './mobileBack'
+import { useClosing } from './useClosing'
+import { MobileAddToPlaylistSheet } from './MobilePlaylistSheets'
 import { Cover, IconClose, IconHeart, IconHeartFilled, IconMusicNote, mobileToast, songArtists } from './ui'
 import type { MobileNavApi } from './nav'
 
 const LONG_PRESS_MS = 450
 const LONG_PRESS_SLOP = 10
 
-/** 长按手势 hook：返回绑定到任意元素的长按事件 props。 */
+/** 长按手势 hook：返回绑定到任意元素的长按事件 props。
+ *  按下 300ms 后给元素打 .is-longing（视觉暗示即将触发），450ms 真触发。 */
 export function useLongPress(onLongPress: () => void) {
   const timerRef = useRef<number | null>(null)
+  const hintRef = useRef<number | null>(null)
   const startRef = useRef<{ x: number; y: number } | null>(null)
   const firedRef = useRef(false)
 
   const cancel = useCallback(() => {
     if (timerRef.current != null) window.clearTimeout(timerRef.current)
+    if (hintRef.current != null) window.clearTimeout(hintRef.current)
     timerRef.current = null
+    hintRef.current = null
     startRef.current = null
+    if (longPressElRef.current) {
+      longPressElRef.current.classList.remove('is-longing')
+      longPressElRef.current = null
+    }
   }, [])
 
-  useEffect(() => cancel, [cancel])
+  // 当前绑定元素引用（classList 加视觉态，避免为一次高亮引入 React state 重渲染）
+  const longPressElRef = useRef<HTMLElement | null>(null)
 
   return {
     onTouchStart: (e: React.TouchEvent) => {
       if (e.touches.length !== 1) return
       firedRef.current = false
       startRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+      longPressElRef.current = e.currentTarget as HTMLElement
+      hintRef.current = window.setTimeout(() => {
+        longPressElRef.current?.classList.add('is-longing')
+      }, 300)
       timerRef.current = window.setTimeout(() => {
         firedRef.current = true
         if (navigator.vibrate) { try { navigator.vibrate(12) } catch { /* ignore */ } }
+        if (longPressElRef.current) {
+          longPressElRef.current.classList.remove('is-longing')
+          longPressElRef.current = null
+        }
         onLongPress()
       }, LONG_PRESS_MS)
     },
@@ -82,17 +102,25 @@ export const MobileSongActionSheet = memo(function MobileSongActionSheet({ targe
   const player = useMobilePlayer()
   const [mvLoading, setMvLoading] = useState(false)
   const [favBusy, setFavBusy] = useState(false)
+  const [addPlaylistOpen, setAddPlaylistOpen] = useState(false)
+  // 关闭动画 hook 必须在条件 return 之前调用（Hook 规则）：target 为 null 时
+  // 传 noop，面板真正挂载期间 closeAnimated 才有意义。
+  const noopClose = useCallback(() => {}, [])
+  const [, closeAnimated, maskClosing] = useClosing(target ? onClose : noopClose)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useMobileBack(() => {
-    if (target) { onClose(); return true }
+    if (addPlaylistOpen) { setAddPlaylistOpen(false); return true }
+    if (target) { closeAnimated(); return true }
     return false
-  }, [Boolean(target), onClose])
+  }, [Boolean(target), addPlaylistOpen, closeAnimated])
 
   if (!target) return null
   const song = target.song
   const platform = (song.platform || 'netease') as MusicPlatform
   const like = peekSongFavoriteStatus(song, platform, nav.userId || '') ?? false
 
-  const close = () => onClose()
+  const close = () => closeAnimated()
 
   const actions: Array<{ icon: ReactNode; label: string; danger?: boolean; run: () => void | Promise<void> }> = [
     {
@@ -161,6 +189,34 @@ export const MobileSongActionSheet = memo(function MobileSongActionSheet({ targe
       },
     }] : [],
     {
+      icon: <IconMusicNote size={18} />,
+      label: '加入歌单',
+      run: () => setAddPlaylistOpen(true),
+    },
+    ...(platform === 'netease' ? [{
+      icon: <IconClose size={16} />,
+      label: '不感兴趣（改善日推）',
+      run: async () => {
+        try {
+          const res = await neteaseRecommendDislike(String(song.id))
+          if (res && (res.code === 200 || res.ok)) mobileToast('已减少此类推荐', 'success')
+          else mobileToast('仅对每日推荐/私人FM生效', 'error')
+        } catch { mobileToast('操作失败', 'error') }
+        close()
+      },
+    }] : []),
+    ...(platform === 'qq' ? [{
+      icon: <IconClose size={16} />,
+      label: '不喜欢（改善推荐）',
+      run: async () => {
+        try {
+          const ok = await toggleQQDislike(song)
+          mobileToast(ok ? '已标记为不喜欢' : '已取消不喜欢', 'success')
+        } catch (err) { mobileToast(err instanceof Error ? err.message : '操作失败', 'error') }
+        close()
+      },
+    }] : []),
+    {
       icon: <IconClose size={16} />,
       label: '复制信息',
       run: async () => {
@@ -172,7 +228,7 @@ export const MobileSongActionSheet = memo(function MobileSongActionSheet({ targe
   ]
 
   return createPortal(
-    <div className="wf-m-sheet-mask" onClick={close}>
+    <div className={`wf-m-sheet-mask ${maskClosing ? 'is-closing' : ''}`} onClick={close}>
       <div className="wf-m-actionsheet" onClick={e => e.stopPropagation()}>
         <div className="wf-m-actionsheet-head">
           <Cover song={song} size={120} rounded={10} />
@@ -196,6 +252,12 @@ export const MobileSongActionSheet = memo(function MobileSongActionSheet({ targe
         </div>
         <button type="button" className="wf-m-actionsheet-cancel" onClick={close}>取消</button>
       </div>
+      <MobileAddToPlaylistSheet
+        song={addPlaylistOpen ? song : null}
+        platform={platform}
+        account={{ loggedIn: Boolean(nav.userId), userId: nav.userId }}
+        onClose={() => setAddPlaylistOpen(false)}
+      />
     </div>,
     document.body,
   )

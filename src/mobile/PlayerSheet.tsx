@@ -6,10 +6,16 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getLyrics, type LyricLine } from '../services/musicApi'
 import { useColorThief } from '../hooks/useColorThief'
 import { useMobilePlayer, useMobileTime } from './mobilePlayer'
+import { getMobileAudioQuality, setMobileAudioQuality } from './mobilePlayer'
+import { getQualityOptions } from '../services/audioQualitySettings'
+import { getMobileEffectsScene, setMobileEffectsScene, getMobileScenes } from './mobileEffects'
+import MobileCommentsSheet from './MobileCommentsSheet'
+import MobileSongDetailSheet from './MobileSongDetailSheet'
+import MobileLyricSettingsSheet, { readLyricViewSettings, type LyricViewSettings } from './MobileLyricSettingsSheet'
 import { useMobileBack } from './mobileBack'
 import {
-  Cover, IconChevronDown, IconClose, IconHeart, IconHeartFilled, IconNext, IconPause, IconPlay,
-  IconPrev, IconQueue, IconRepeat, IconRepeatOne, IconShuffle, IconVolume, Spinner, fmtTime, songArtists, songCoverUrl,
+  Cover, IconArrowDown, IconArrowUp, IconChevronDown, IconClose, IconHeart, IconHeartFilled, IconMore, IconNext, IconPause, IconPlay,
+  IconPrev, IconQueue, IconRepeat, IconRepeatOne, IconSettings2, IconShuffle, IconVolume, Spinner, fmtTime, songArtists, songCoverUrl,
 } from './ui'
 
 export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -18,8 +24,45 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
   const song = player.currentSong
   const [view, setView] = useState<'cover' | 'lyrics'>('cover')
   const [queueOpen, setQueueOpen] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [commentsOpen, setCommentsOpen] = useState(false)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [lyricSettingsOpen, setLyricSettingsOpen] = useState(false)
+  const [lyricView, setLyricView] = useState<LyricViewSettings>(readLyricViewSettings)
+  useEffect(() => {
+    const sync = () => setLyricView(readLyricViewSettings())
+    window.addEventListener('waveforge:mobile-lyric-view-changed', sync)
+    return () => window.removeEventListener('waveforge:mobile-lyric-view-changed', sync)
+  }, [])
   const [dragY, setDragY] = useState(0)
   const dragStartRef = useRef<{ x: number; y: number; mode: '' | 'vertical' | 'horizontal' } | null>(null)
+
+  // ── 音质面板状态（按当前平台档位选项）──
+  const songPlatform = (song?.platform || 'netease') as Parameters<typeof getQualityOptions>[0]
+  const qualityOptions = useMemo(() => getQualityOptions(songPlatform), [songPlatform])
+  const [qualityValue, setQualityValue] = useState<string>(() => String(getMobileAudioQuality(songPlatform)))
+  useEffect(() => {
+    const sync = () => setQualityValue(String(getMobileAudioQuality(songPlatform)))
+    sync()
+    window.addEventListener('waveforge:mobile-quality-changed', sync)
+    return () => window.removeEventListener('waveforge:mobile-quality-changed', sync)
+  }, [songPlatform])
+
+  // ── 音效场景状态 ──
+  const [effectScene, setEffectScene] = useState<string>(() => getMobileEffectsScene())
+  const mobileScenes = useMemo(() => getMobileScenes(), [])
+
+  // ── 倍速 ──
+  const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2]
+  const [speed, setSpeed] = useState(1)
+  useEffect(() => {
+    // 当前曲变化/切歌后 playbackRate 可能被引擎归位：面板打开时读取真实值
+    if (moreOpen) setSpeed(player.audioRate ?? 1)
+  }, [moreOpen, player.audioRate])
+  const changeSpeed = useCallback((v: number) => {
+    setSpeed(v)
+    player.setAudioRate(v)
+  }, [player])
 
   // 封面取色 → 播放页沉浸式渐变背景（官方手机播放页质感）
   const coverUrl = song ? songCoverUrl(song, 300) : ''
@@ -125,13 +168,14 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
     player.seekTo(Math.max(0, time - 0.2))
   }, [player])
 
-  // BACK：队列抽屉 → 播放页 → 关闭
+  // BACK：队列抽屉/更多面板 → 播放页 → 关闭
   useMobileBack(() => {
     if (!open) return false
     if (queueOpen) { setQueueOpen(false); return true }
+    if (moreOpen) { setMoreOpen(false); return true }
     onClose()
     return true
-  }, [open, queueOpen, onClose])
+  }, [open, queueOpen, moreOpen, onClose])
 
   if (!open || !song) return null
 
@@ -140,7 +184,7 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
 
   return (
     <div
-      className="wf-m-sheet"
+      className={`wf-m-sheet ${dragY ? 'is-dragging' : ''}`}
       style={{ transform: dragY ? `translateY(${dragY}px)` : undefined, transition: dragY ? 'none' : undefined }}
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
@@ -163,6 +207,9 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
         </div>
         <button type="button" className="wf-m-iconbtn" aria-label="播放队列" onClick={() => setQueueOpen(v => !v)}>
           <IconQueue size={20} />
+        </button>
+        <button type="button" className="wf-m-iconbtn" aria-label="更多设置" onClick={() => setMoreOpen(v => !v)}>
+          <IconMore size={20} />
         </button>
       </header>
 
@@ -190,10 +237,21 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
               setView('cover')
             }}
           >
+            <button
+              type="button"
+              className="wf-m-lyric-settings-btn"
+              aria-label="歌词设置"
+              onClick={e => { e.stopPropagation(); setLyricSettingsOpen(true) }}
+            >
+              <IconSettings2 size={18} />
+            </button>
             <LyricsList
               lyrics={lyrics}
               activeIndex={activeLyricIndex}
               onSeekLine={onSeekLyricLine}
+              showTranslation={lyricView.showTranslation}
+              showRoman={lyricView.showRoman}
+              fontScale={lyricView.fontScale}
             />
             {lyricsLoading && <Spinner />}
             {!lyricsLoading && !lyrics.length && <p className="wf-m-sheet-hint">暂无歌词 · 点按空白处返回封面</p>}
@@ -201,9 +259,9 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
         )}
       </div>
 
-      <div className="wf-m-sheet-meta">
+      <div className="wf-m-sheet-meta" onClick={() => setDetailOpen(true)} role="button" aria-label="查看歌曲详情">
         <div className="wf-m-sheet-title">{song.name}</div>
-        <div className="wf-m-sheet-artist">{songArtists(song)}</div>
+        <div className="wf-m-sheet-artist">{songArtists(song)} ›</div>
       </div>
 
       <div className="wf-m-sheet-seek">
@@ -277,33 +335,163 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
                     <span className="wf-m-queue-sub">{songArtists(q)}</span>
                   </span>
                   {player.queue.length > 1 && (
-                    <span
-                      role="button"
-                      className="wf-m-queue-remove"
-                      onClick={e => { e.stopPropagation(); player.removeAt(i) }}
-                    >
-                      <IconClose size={14} />
+                    <span className="wf-m-queue-actions" onClick={e => e.stopPropagation()}>
+                      {/* 上移（首行隐藏）；当前曲也可移动（索引随动，mobilePlayer.moveAt 处理） */}
+                      {i > 0 && (
+                        <span
+                          role="button"
+                          aria-label="上移"
+                          className="wf-m-queue-move"
+                          onClick={() => player.moveAt(i, i - 1)}
+                        >
+                          <IconArrowUp size={14} />
+                        </span>
+                      )}
+                      {i < player.queue.length - 1 && (
+                        <span
+                          role="button"
+                          aria-label="下移"
+                          className="wf-m-queue-move"
+                          onClick={() => player.moveAt(i, i + 1)}
+                        >
+                          <IconArrowDown size={14} />
+                        </span>
+                      )}
+                      <span
+                        role="button"
+                        className="wf-m-queue-remove"
+                        onClick={e => { e.stopPropagation(); player.removeAt(i) }}
+                      >
+                        <IconClose size={14} />
+                      </span>
                     </span>
                   )}
                 </button>
               </li>
             ))}
           </ul>
+          <div className="wf-m-queue-foot">
+            <button type="button" className="wf-m-queue-clear" onClick={() => player.clearQueue()}>清空队列</button>
+          </div>
         </div>
       )}
+
+      {/* 更多面板：音质 / 音效 / 倍速 / 睡眠定时 */}
+      {moreOpen && (
+        <div className="wf-m-queue wf-m-more" onClick={e => e.stopPropagation()}>
+          <div className="wf-m-queue-head">
+            <span>播放设置</span>
+            <button type="button" className="wf-m-iconbtn" onClick={() => setMoreOpen(false)}><IconClose size={18} /></button>
+          </div>
+          <div className="wf-m-more-body">
+            {/* 音质 */}
+            <div className="wf-m-more-group">
+              <div className="wf-m-more-label">音质（下一首生效）</div>
+              <div className="wf-m-hotwords">
+                {qualityOptions.map(opt => (
+                  <button
+                    key={String(opt.value)}
+                    type="button"
+                    className={`wf-m-chip ${qualityValue === String(opt.value) ? 'is-on' : ''}`}
+                    onClick={() => { setMobileAudioQuality(songPlatform, opt.value as never); setQualityValue(String(opt.value)) }}
+                  >
+                    {opt.shortLabel || opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* 音效场景 */}
+            <div className="wf-m-more-group">
+              <div className="wf-m-more-label">音效场景</div>
+              <div className="wf-m-hotwords">
+                {[{ id: 'off', name: '关闭' }, ...mobileScenes].map(scene => (
+                  <button
+                    key={scene.id}
+                    type="button"
+                    className={`wf-m-chip ${effectScene === scene.id ? 'is-on' : ''}`}
+                    onClick={() => { setMobileEffectsScene(scene.id); setEffectScene(scene.id) }}
+                  >
+                    {scene.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* 倍速 */}
+            <div className="wf-m-more-group">
+              <div className="wf-m-more-label">倍速</div>
+              <div className="wf-m-hotwords">
+                {PLAYBACK_SPEEDS.map(v => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`wf-m-chip ${speed === v ? 'is-on' : ''}`}
+                    onClick={() => changeSpeed(v)}
+                  >
+                    {v === 1 ? '原速' : `${v}x`}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* 睡眠定时 */}
+            <div className="wf-m-more-group">
+              <div className="wf-m-more-label">
+                睡眠定时
+                {player.sleepTimerEndsAt != null && (
+                  <span className="wf-m-more-timer">剩 {Math.max(0, Math.ceil((player.sleepTimerEndsAt - Date.now()) / 60000))} 分钟</span>
+                )}
+              </div>
+              <div className="wf-m-hotwords">
+                {[15, 30, 60, 90].map(m => (
+                  <button key={m} type="button" className="wf-m-chip" onClick={() => player.setSleepTimer(m)}>
+                    {m} 分钟
+                  </button>
+                ))}
+                {player.sleepTimerEndsAt != null && (
+                  <button type="button" className="wf-m-chip is-on" onClick={() => player.setSleepTimer(0)}>取消</button>
+                )}
+              </div>
+            </div>
+            {/* 评论 / 歌曲详情 */}
+            <div className="wf-m-more-group wf-m-more-row">
+              <button type="button" className="wf-m-btn wf-m-btn-primary" onClick={() => { setMoreOpen(false); setCommentsOpen(true) }}>
+                查看热门评论
+              </button>
+              <button type="button" className="wf-m-btn wf-m-btn-ghost" onClick={() => { setMoreOpen(false); setDetailOpen(true) }}>
+                歌曲详情
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 热评面板 */}
+      <MobileCommentsSheet song={commentsOpen ? song : null} onClose={() => setCommentsOpen(false)} />
+      {/* 歌曲详情面板 */}
+      <MobileSongDetailSheet song={detailOpen ? song : null} onClose={() => setDetailOpen(false)} />
+      {/* 歌词设置面板 */}
+      <MobileLyricSettingsSheet
+        open={lyricSettingsOpen}
+        settings={lyricView}
+        onChange={setLyricView}
+        onClose={() => setLyricSettingsOpen(false)}
+      />
     </div>
   )
 })
 
 /** 歌词列表：按高亮行号 memo——播放进度每 tick 只需要改一个行的 class，
- *  不再整列表重新 reconcile（几百行歌词时每秒 4 次全量 diff 是白烧的电）。 */
-const LyricsList = memo(function LyricsList({ lyrics, activeIndex, onSeekLine }: {
+ *  不再整列表重新 reconcile（几百行歌词时每秒 4 次全量 diff 是白烧的电）。
+ *  支持翻译/罗马音开关与字号档（歌词设置面板持久化）。 */
+const LyricsList = memo(function LyricsList({ lyrics, activeIndex, onSeekLine, showTranslation, showRoman, fontScale }: {
   lyrics: LyricLine[]
   activeIndex: number
   onSeekLine: (time: number) => void
+  showTranslation: boolean
+  showRoman: boolean
+  fontScale: number
 }) {
   return (
-    <>
+    <div style={{ fontSize: `calc(1rem * ${fontScale})` }}>
       {lyrics.map((line, i) => (
         <p
           key={i}
@@ -312,9 +500,10 @@ const LyricsList = memo(function LyricsList({ lyrics, activeIndex, onSeekLine }:
           onClick={() => onSeekLine(line.time)}
         >
           {line.text || '♪'}
-          {line.translation && <span className="wf-m-lyric-trans">{line.translation}</span>}
+          {showTranslation && line.translation && <span className="wf-m-lyric-trans">{line.translation}</span>}
+          {showRoman && line.roman && <span className="wf-m-lyric-trans">{line.roman}</span>}
         </p>
       ))}
-    </>
+    </div>
   )
 })

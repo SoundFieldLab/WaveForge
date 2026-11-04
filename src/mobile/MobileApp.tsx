@@ -15,7 +15,7 @@ import type { MusicPlatform } from '../services/platforms'
 import type { ExplorePlaylist } from '../services/exploreApi'
 import { getAppliedFormFactor, type FormFactor } from '../platform'
 import { MobilePlayerProvider } from './mobilePlayer'
-import { MobileNavContext, type MobileTabKey, type MobileAlbumTarget, type MobileArtistTarget, type MobileMvTarget, type MobileSongActionsTarget } from './nav'
+import { MobileNavContext, type MobileTabKey, type MobileAlbumTarget, type MobileArtistTarget, type MobileChartTarget, type MobileMvTarget, type MobileSongActionsTarget } from './nav'
 import { useMobileBack } from './mobileBack'
 import { useAccounts } from './mobileLogin'
 import MiniPlayerBar from './MiniPlayerBar'
@@ -29,6 +29,7 @@ const MobileLibrary = lazy(() => import('./pages/MobileLibrary'))
 const MobileSettings = lazy(() => import('./pages/MobileSettings'))
 const MobilePlaylistDetail = lazy(() => import('./pages/MobilePlaylistDetail'))
 const MobileArtistPage = lazy(() => import('./pages/MobileArtistPage'))
+const MobileChartDetail = lazy(() => import('./pages/MobileChartDetail'))
 const MobileMvPlayer = lazy(() => import('./MobileMvPlayer'))
 
 const PLATFORM_KEY = 'waveforge:mobile-platform'
@@ -46,6 +47,7 @@ type StackItem =
   | { kind: 'playlist'; playlist: ExplorePlaylist; id: number }
   | { kind: 'album'; album: MobileAlbumTarget; id: number }
   | { kind: 'artist'; artist: MobileArtistTarget; id: number }
+  | { kind: 'chart'; chart: MobileChartTarget; id: number }
 
 export default function MobileApp() {
   // 初始/切换都读应用态形态（data-form，含 ?ui 模拟覆盖）：Fold 真机与 PC 模拟口径一致
@@ -72,7 +74,8 @@ export default function MobileApp() {
   const push = useCallback((item:
     | { kind: 'playlist'; playlist: ExplorePlaylist }
     | { kind: 'album'; album: MobileAlbumTarget }
-    | { kind: 'artist'; artist: MobileArtistTarget }) => {
+    | { kind: 'artist'; artist: MobileArtistTarget }
+    | { kind: 'chart'; chart: MobileChartTarget }) => {
     stackSeqRef.current += 1
     const id = stackSeqRef.current
     setStack(prev => [...prev, { ...item, id } as StackItem])
@@ -88,6 +91,10 @@ export default function MobileApp() {
 
   const openArtist = useCallback((artist: MobileArtistTarget) => {
     push({ kind: 'artist', artist })
+  }, [push])
+
+  const openChart = useCallback((chart: MobileChartTarget) => {
+    push({ kind: 'chart', chart })
   }, [push])
 
   const setPlatform = useCallback((p: MusicPlatform) => {
@@ -121,13 +128,13 @@ export default function MobileApp() {
 
   const nav = useMemo(() => ({
     tab: currentTab,
-    switchTab, openPlaylist, openAlbum, openArtist,
+    switchTab, openPlaylist, openAlbum, openArtist, openChart,
     openMv: (mv: MobileMvTarget) => setMvTarget(mv),
     openSongActions: (target: MobileSongActionsTarget) => setSongActions(target),
     openPlayer: () => setPlayerOpen(true),
     platform, setPlatform,
     userId: accounts[platform]?.userId || '',
-  }), [currentTab, switchTab, openPlaylist, openAlbum, openArtist, platform, setPlatform, accounts])
+  }), [currentTab, switchTab, openPlaylist, openAlbum, openArtist, openChart, platform, setPlatform, accounts])
 
   return (
     <MobileNavContext.Provider value={nav}>
@@ -166,6 +173,9 @@ function StackRenderer({ stack, currentTab }: { stack: StackItem[]; currentTab: 
     }
     if (item.kind === 'artist') {
       return <MobileArtistPage key={item.id} target={item.artist} />
+    }
+    if (item.kind === 'chart') {
+      return <MobileChartDetail key={item.id} chart={item.chart} />
     }
   }
   return <TabPage tab={currentTab} />

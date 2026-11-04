@@ -43,6 +43,8 @@ export const IconRefresh = svg(<><path d="M20 12a8 8 0 1 1-2.5-5.8" /><path d="M
 export const IconFire = svg(<path d="M12 3s1 2.2-.8 4.6C9.6 9.7 7 11 7 14a5 5 0 0 0 10 0c0-1.6-.7-2.7-1.4-3.6-.5 1-1.2 1.6-2.1 1.9.5-2.5-.3-6-1.5-9.3z" />)
 export const IconClock = svg(<><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>)
 export const IconChevronDown = svg(<path d="m5 9.5 7 7 7-7" />)
+export const IconArrowUp = svg(<><path d="M12 19V5" /><path d="m6 11 6-6 6 6" /></>)
+export const IconArrowDown = svg(<><path d="M12 5v14" /><path d="m6 13 6 6 6-6" /></>)
 export const IconPlayCircle = svg(<><circle cx="12" cy="12" r="9" /><path d="M10 8.6v6.8c0 .8.9 1.3 1.6.9l5-3.4c.6-.4.6-1.4 0-1.8l-5-3.4c-.7-.4-1.6.1-1.6.9z" /></>)
 export const IconSearchDel = svg(<><circle cx="12" cy="12" r="8.5" /><path d="M9.5 9.5l5 5M14.5 9.5l-5 5" /></>)
 
@@ -95,6 +97,7 @@ export const Cover = memo(function Cover({ song, url, size = 300, className, rou
   )
 })
 
+export const IconSettings2 = svg(<><path d='M5 7h8' /><circle cx='16.5' cy='7' r='2.2' /><path d='M11 12h8' /><circle cx='7.5' cy='12' r='2.2' /><path d='M5 17h8' /><circle cx='16.5' cy='17' r='2.2' /></>)
 export const IconMusicNote = svg(<><circle cx="8" cy="17.5" r="3" /><circle cx="18" cy="15.5" r="3" /><path d="M11 17.5V6l10-2v11.5" /></>)
 
 // ── VIP / 无版权角标 ──

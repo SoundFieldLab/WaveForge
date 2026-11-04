@@ -8,6 +8,10 @@ import { platformLabel } from '../../services/platforms'
 import { useMobileNav } from '../nav'
 import { useMobilePlayer } from '../mobilePlayer'
 import { useAccounts } from '../mobileLogin'
+import { useLongPress } from '../MobileActionSheet'
+import {
+  MobileCreatePlaylistSheet, MobilePlaylistManageSheet,
+} from '../MobilePlaylistSheets'
 import { Cover, EmptyState, ErrorRetry, IconHeartFilled, Spinner, songArtists, useLazyList } from '../ui'
 
 const RECENT_KEY = 'waveforge:mobile-recent'
@@ -30,6 +34,8 @@ export default memo(function MobileLibrary() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [recent, setRecent] = useState<Song[]>(() => readRecent())
+  const [createOpen, setCreateOpen] = useState(false)
+  const [manageTarget, setManageTarget] = useState<{ id: string; name: string; subscribed?: boolean; owned: boolean } | null>(null)
 
   function readRecent(): Song[] {
     try {
@@ -71,6 +77,12 @@ export default memo(function MobileLibrary() {
 
   const liked = playlists?.find(p => p.isLike)
   const created = playlists?.filter(p => !p.isLike) || []
+  // 判定是否本人创建的歌单：creator 字段是当前账号昵称或 userId（各平台口径不同，宽松匹配）
+  const isOwnedPlaylist = useCallback((item: UserPlaylistItem) => {
+    const creator = typeof item.creator === 'string' ? item.creator : item.creator?.nickname
+    if (!creator) return true // 无 creator 信息的多为本人歌单
+    return creator === account?.username
+  }, [account?.username])
 
   const openPlaylist = useCallback((item: UserPlaylistItem) => {
     nav.openPlaylist({
@@ -117,18 +129,19 @@ export default memo(function MobileLibrary() {
               </section>
             )}
             <section className="wf-m-section">
-              <h3 className="wf-m-section-title">创建/收藏的歌单（{created.length}）</h3>
-              {!created.length && <p className="wf-m-hint">还没有歌单</p>}
+              <div className="wf-m-section-head">
+                <h3 className="wf-m-section-title">创建/收藏的歌单（{created.length}）</h3>
+                <button type="button" className="wf-m-playall" onClick={() => setCreateOpen(true)}>＋ 新建</button>
+              </div>
+              {!created.length && <p className="wf-m-hint">还没有歌单，点右上角「＋ 新建」创建</p>}
               <ul className="wf-m-pl-list">
                 {created.map(pl => (
                   <li key={`${pl.id}`}>
-                    <button type="button" className="wf-m-pl-row" onClick={() => openPlaylist(pl)}>
-                      <Cover url={pl.coverImgUrl || pl.coverUrl} size={180} rounded={10} />
-                      <span className="wf-m-pl-row-meta">
-                        <span className="wf-m-pl-row-name">{pl.name}</span>
-                        <span className="wf-m-pl-row-sub">{pl.trackCount || 0}首</span>
-                      </span>
-                    </button>
+                    <PlaylistRow
+                      item={pl}
+                      onOpen={() => openPlaylist(pl)}
+                      onManage={() => setManageTarget({ id: String(pl.id), name: pl.name, owned: isOwnedPlaylist(pl) })}
+                    />
                   </li>
                 ))}
               </ul>
@@ -138,7 +151,51 @@ export default memo(function MobileLibrary() {
       ) : null}
 
       <RecentSection recent={recent} />
+
+      {/* 新建歌单弹窗 */}
+      <MobileCreatePlaylistSheet
+        open={createOpen}
+        platform={nav.platform}
+        account={account}
+        onClose={() => setCreateOpen(false)}
+        onCreated={load}
+      />
+      {/* 歌单管理弹窗（长按歌单行） */}
+      <MobilePlaylistManageSheet
+        playlist={manageTarget ? { id: manageTarget.id, name: manageTarget.name } : null}
+        platform={nav.platform}
+        account={account}
+        owned={manageTarget?.owned ?? false}
+        onClose={() => setManageTarget(null)}
+        onChanged={load}
+      />
     </div>
+  )
+})
+
+/** 歌单行（长按弹出管理面板）：hook 只能在组件里调，抽出行组件。 */
+const PlaylistRow = memo(function PlaylistRow({ item, onOpen, onManage }: {
+  item: UserPlaylistItem
+  onOpen: () => void
+  onManage: () => void
+}) {
+  const longPress = useLongPress(onManage)
+  // longPress 自带 onContextMenu（桌面调试右键触发），不重复绑定
+  const { onContextMenu, ...restLongPress } = longPress
+  return (
+    <button
+      type="button"
+      className="wf-m-pl-row"
+      onClick={onOpen}
+      onContextMenu={e => { onContextMenu?.(e); e.preventDefault(); onManage() }}
+      {...restLongPress}
+    >
+      <Cover url={item.coverImgUrl || item.coverUrl} size={180} rounded={10} />
+      <span className="wf-m-pl-row-meta">
+        <span className="wf-m-pl-row-name">{item.name}</span>
+        <span className="wf-m-pl-row-sub">{item.trackCount || 0}首</span>
+      </span>
+    </button>
   )
 })
 
