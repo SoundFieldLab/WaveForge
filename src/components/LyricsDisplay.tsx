@@ -2825,7 +2825,12 @@ export default memo(function LyricsDisplay({
             : isCurrent
             ? 0
             : lineTiming.releaseProgress > 0
-            ? Math.min(2.5, 0.5 + lineTiming.releaseProgress * 2.0)
+            // 刚唱完的行不再做"先虚化再回落"（PC 端反馈的"虚化一下"）：
+            // release ramp（0.5→2.5→0）只保留给距离 ≥2 的远景行做纵深，
+            // 邻行（distance=1）与真机一致保持清晰（对齐 5f2ded4 在手机 motion model 上的修复）。
+            ? (distanceFromCurrent <= 1
+              ? 0
+              : Math.min(2.5, 0.5 + lineTiming.releaseProgress * 2.0))
             : lineTiming.upcomingProgress > 0
             ? Math.max(0, 1.05 - lineTiming.upcomingProgress * 1.05)
             : 0
