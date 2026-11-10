@@ -1492,7 +1492,9 @@ export default function PlayerControls({
                 <motion.div
                   initial={{ width: tvCompact ? '480px' : '360px' }}
                   animate={{
-                    width: tvCompact ? '480px' : isExpanded ? '640px' : '360px',
+                    // 视口钳制（2026-11-08 手机适配）：窄视口（pc-touch 手机 901px 等）
+                    // 下 640px 展开条会顶满屏缘甚至溢出，钳到 92vw；360px 收起同理防挤出。
+                    width: `min(${tvCompact ? '480px' : isExpanded ? '640px' : '360px'}, 92vw)`,
                     // 药丸总高锁死为原值（TV 紧凑 32px / 展开 44px / 收起 36px）：右侧控件并入进度行后，
                     // 行高由 32px 图标按钮主导，内边距相应收窄补偿，视觉高度与旧版绝对定位簇完全一致。
                     paddingTop: tvCompact ? (isExpanded ? '2px' : '10px') : isExpanded ? '6px' : '12px',
@@ -1734,7 +1736,8 @@ export default function PlayerControls({
         <motion.div
           initial={{ width: '360px' }}
           animate={{
-            width: isExpanded ? '640px' : '360px',
+            // 视口钳制：同 immersive pill 注释——窄视口防溢出（手机 pc-touch 901px 等）
+            width: `min(${isExpanded ? '640px' : '360px'}, 92vw)`,
             // 药丸总高锁死为原值（展开 44px / 收起 36px）：右侧控件并入进度行后行高由
             // 32px 图标按钮主导，内边距收窄补偿，视觉高度与旧版绝对定位簇完全一致。
             paddingTop: isExpanded ? '6px' : '12px',

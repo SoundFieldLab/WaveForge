@@ -262,6 +262,19 @@ export default function ImmersiveControls({
   const shiftTop = (top: string) => (immersiveRail ? `calc(${top} + ${rowOffsetRem}rem)` : top)
   // 各按钮顶位置都按同一行高网格计算（不能混用 Tailwind top-16=4rem：TV 紧凑档会错位/重叠）
   // 沉浸模式行序：箭头(第一行) → Home(4rem) → 翻译(8rem) → 罗马音(12rem) → …
+  // 行宽统一常量前移声明：railRowSize 引用 slabWidthPx（定义在下方底板尺寸处）
+  const slabWidthPx = tvCompact ? 40 : 48
+  const slabRowPx = tvCompact ? 51.2 : 64
+  // ⚠️ 行宽统一（2026-11-08 手机适配修复）：所有行显式 slabWidthPx 见方（slab 网格的定义宽），
+  //  不再让 p-3 内容差异决定行宽——实测 QuickSettings 无 width 传入时行盒被内容撑成 46/48px
+  //  混杂、右锚 right-0 下右缘参差（实测 right=922/910/880/877，窄视口直接溢出屏幕 21px）。
+  //  统一后所有行同宽同锚、板内左右对齐；`justify-center` 保证图标居中不受宽度影响。
+  const railRowSize = { width: `${slabWidthPx}px`, height: `${slabWidthPx}px` }
+  // 行高网格（沉浸模式，板顶 = 容器 0）：
+  //   第 0 行 = 收起箭头（`top-3` → 板的上留白天然是 12px）
+  //   之后每行 slabRowPx = Home / 各功能行 / 人声分轨 / 快速设置 / 调音室
+  // 最后一行：有调音室按钮时是调音室（比快速设置再往下一行 → 基址多一行），否则就是快速设置
+  const slabLastRowBasePx = onOpenMixingStudio ? (tvCompact ? 102.4 : 128) : (tvCompact ? 51.2 : 64)
   const homeButtonTop = immersiveRail ? `${(tvCompact ? 3.2 : 4)}rem` : undefined
   // 整组避让：无「即将播放」弹框时控件组顶部 = 34px（与其它模式的右上角按钮列同高）；
   // 弹框出现时整组一起下移，让箭头的视口位置落到「弹框下沿 + 12px」（箭头在列内固定 top-3）。
@@ -282,15 +295,7 @@ export default function ImmersiveControls({
     duration: 0.48,
     ease: [0.22, 1, 0.36, 1] as const,
   }
-  // 工具条底板尺寸：行宽 = 按钮实际占位（PC 12px 内边距 + 24px 图标 = 48；TV 10px + 20px = 40），
-  // 行高 = 同一网格的拍长（PC 64 / TV 51.2），下留白与箭头的 top-3 对齐（12px）。
-  const slabWidthPx = tvCompact ? 40 : 48
-  const slabRowPx = tvCompact ? 51.2 : 64
-  // 行高网格（沉浸模式，板顶 = 容器 0）：
-  //   第 0 行 = 收起箭头（`top-3` → 板的上留白天然是 12px）
-  //   之后每行 slabRowPx = Home / 各功能行 / 人声分轨 / 快速设置 / 调音室
-  // 最后一行：有调音室按钮时是调音室（比快速设置再往下一行 → 基址多一行），否则就是快速设置
-  const slabLastRowBasePx = onOpenMixingStudio ? (tvCompact ? 102.4 : 128) : (tvCompact ? 51.2 : 64)
+  // 工具条底板尺寸声明已前移（266-267 行，railRowSize 引用其值）
   // ⚠️ 必须再加**一行**（`railRowCount + 1`）：除 Home 外所有按钮的 top 都经过 `shiftTop`，整列比基址
   //   多下移一行给箭头让位。漏算这一行时板底会短一行，最后一行按钮从板子里掉出去（实测溢出 52px，
   //   而 `rowsInsideSlab` 只校验上/左/右三边，看不出来 —— 校验必须连底边一起查）。
@@ -685,8 +690,8 @@ export default function ImmersiveControls({
         whileTap={slabRail ? { scale: 0.94 } : { scale: 0.96 }}
         onClick={onHomeClick}
         aria-label="回到主界面"
-        className={`absolute ${sideCls} ${immersiveRail ? '' : 'top-0'} ${btnPad} ${unifiedGlassCls}`}
-        style={{ ...glassBaseStyle, ...(homeButtonTop ? { top: homeButtonTop } : {}) }}
+        className={`absolute ${sideCls} ${immersiveRail ? '' : 'top-0'} ${btnPad} ${unifiedGlassCls} flex items-center justify-center`}
+        style={{ ...glassBaseStyle, ...railRowSize, ...(homeButtonTop ? { top: homeButtonTop } : {}) }}
       >
         <Home className={`${iconCls} ${neutralIconCls}`} />
         {!immersiveRail && <ControlTooltip label="回到主界面" dark={playerTheme === 'dark'} />}
@@ -709,8 +714,8 @@ export default function ImmersiveControls({
           whileTap={slabRail ? { scale: 0.94 } : { scale: 0.96 }}
           onClick={onTranslationToggle}
           aria-label="切换翻译歌词"
-          className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls}`}
-          style={{ top: translationButtonTop, ...featureSurfaceStyle(translationEnabled) }}
+          className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls} flex items-center justify-center`}
+          style={{ top: translationButtonTop, ...railRowSize, ...featureSurfaceStyle(translationEnabled) }}
         >
           {/* 液态玻璃光泽层（rounded-full 自剪裁，不依赖 overflow-hidden，给 tooltip 留空间）。
               玻璃板形态已改用方形行 + 主色平涂，圆形光泽层会露出圆边，所以只在原圆钮布局下渲染。 */}
@@ -749,8 +754,8 @@ export default function ImmersiveControls({
           whileTap={slabRail ? { scale: 0.94 } : { scale: 0.96 }}
           onClick={onRomanToggle}
           aria-label="切换罗马音歌词"
-          className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls}`}
-          style={{ top: romanButtonTop, ...featureSurfaceStyle(romanEnabled) }}
+          className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls} flex items-center justify-center`}
+          style={{ top: romanButtonTop, ...railRowSize, ...featureSurfaceStyle(romanEnabled) }}
         >
           {romanEnabled && !slabRail && (
             <div
@@ -790,8 +795,8 @@ export default function ImmersiveControls({
         whileTap={slabRail ? { scale: 0.94 } : { scale: 0.96 }}
         onClick={onMvBackgroundToggle}
         aria-label="MV 背景"
-        className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls}`}
-        style={{ top: mvButtonTop, ...featureSurfaceStyle(mvBackgroundEnabled) }}
+        className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls} flex items-center justify-center`}
+        style={{ top: mvButtonTop, ...railRowSize, ...featureSurfaceStyle(mvBackgroundEnabled) }}
       >
         {mvBackgroundEnabled && !slabRail && (
           <div
@@ -855,12 +860,12 @@ export default function ImmersiveControls({
           delay: 0.1,
         }}
         className={`group absolute ${sideCls}`}
-        style={{ top: quickSettingsTop }}
+        style={{ top: quickSettingsTop, ...railRowSize }}
       >
         <QuickSettings
           playerTheme={playerTheme}
           isPureMusic={isPureMusic} // 传递纯音乐标识
-          triggerClassName={`${unifiedGlassCls} ${btnPad}`}
+          triggerClassName={`${unifiedGlassCls} ${btnPad} flex h-full w-full items-center justify-center`}
           triggerStyle={glassBaseStyle}
           triggerIconColor={
             playerTheme === 'dark'
@@ -883,8 +888,8 @@ export default function ImmersiveControls({
           whileHover={slabRail ? undefined : { scale: 1.06, x: hoverShiftX }}
           whileTap={slabRail ? { scale: 0.94 } : { scale: 0.96 }}
           onClick={(e) => onOpenMixingStudio?.(e.currentTarget.getBoundingClientRect())}
-          className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls}`}
-          style={{ ...glassBaseStyle, top: mixingStudioTop }}
+          className={`absolute ${sideCls} ${btnPad} ${unifiedGlassCls} flex items-center justify-center`}
+          style={{ ...glassBaseStyle, top: mixingStudioTop, ...railRowSize }}
           aria-label="打开调音室"
         >
           <AudioLines className={`${iconCls} ${neutralIconCls}`} />

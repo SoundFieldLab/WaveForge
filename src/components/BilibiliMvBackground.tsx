@@ -1364,6 +1364,23 @@ export default memo(function BilibiliMvBackground({
   // 盲目按「音频位置 % 视频时长」校正会让对不上的视频反复 seek，而每次 seek 都触发
   // 视频重缓冲（"放着放着卡一下"）；克制策略（漂移超 3s + 距上次校正 ≥10s）消除该死循环。
   // 看歌模式自身不跑此循环（由 DASH 音频轨同步），此循环只管背景层。
+  // ⚠️ 后台降载（2026-11-08）：页面切后台（visibilitychange hidden）时主动暂停视频
+  // 解码——后台看不见画面，硬件解码器（media.hwcodec 实测 59% CPU）+ 视频帧合成
+  // 纯属白烧，正是后台播放性能红线的主要推手之一。切回前台时走既有 returningFromHidden
+  // 硬同步路径恢复（对齐位置一次 seek，无状态残留）。音频 deck 不受影响照常播放。
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') return
+      for (const ref of [slotARef, slotBRef]) {
+        if (ref.current && !ref.current.paused) ref.current.pause()
+      }
+      // 标记隐藏：切回前台时主 effect（依赖 hidden/视频状态）会走 returningFromHidden
+      // 硬同步路径恢复到音频对齐位置。这里同步 prevHiddenRef 保证该路径能触发。
+      prevHiddenRef.current = true
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
   useEffect(() => {
     if (!isPlaying || !enabled || hidden) {
       for (const ref of [slotARef, slotBRef]) {

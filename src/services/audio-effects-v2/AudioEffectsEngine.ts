@@ -3,6 +3,12 @@ import { SoundTouchNode } from '@soundtouchjs/audio-worklet'
 import processorUrl from '@soundtouchjs/audio-worklet/processor?url'
 import { encodeWav } from '../../audio/TransitionRenderer'
 import { compensationService, type CompensationDesign, type CompensationSegment } from './compensationService'
+import { isAndroidTouchDevice } from '../../platform'
+
+/** lite 降载判定：Android 触屏端（手机/平板）效果链跳过 HRTF/Convolver 重节点。 */
+function isAndroidTouchDeviceLite(): boolean {
+  try { return isAndroidTouchDevice() } catch { return false }
+}
 
 // ============ 设置类型 ============
 
@@ -565,14 +571,16 @@ interface BuiltEffectChain {
   nightCompressor: DynamicsCompressorNode
   nightTreble: BiquadFilterNode
   hallMatrix: MsMatrix
-  hallConvolver: ConvolverNode
+  /** lite 降载模式下为 GainNode 占位（无卷积）；完整模式下为 ConvolverNode */
+  hallConvolver: ConvolverNode | GainNode
   hallWetGain: GainNode
-  panner: PannerNode
+  /** lite 降载模式下为 GainNode 直通占位（无 HRTF）；完整模式下为 PannerNode */
+  panner: PannerNode | GainNode
   pannerWetGain: GainNode
   pannerDryGain: GainNode
 }
 
-function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSettings): BuiltEffectChain {
+function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSettings, lite = false): BuiltEffectChain {
   const input = context.createGain()
   const output = context.createGain()
   input.gain.value = 1
@@ -581,21 +589,35 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
   const voiceMatrix = createMsMatrix(context)
   const presenceMatrix = createMsMatrix(context)
 
-  // 全景声厅：M/S 加宽 + 卷积混响（类型化 IR）
+  // lite 降载模式（Android 触屏端，2026-11-08）：HRTF PannerNode（逐样本卷积）与
+  // ConvolverNode（含 IR buffer 生成/全频卷积）在移动 SoC 的 RealtimeAudioWorker 上
+  // 成本极高（实测 vivo 单线程 96% CPU ≈ 满核）——即使 wet gain=0 不出声也照烧。
+  // lite 模式用普通 GainNode 占位替代（接口字段类型放宽为 AudioNode 消费方兼容），
+  // 开启 3D/厅堂时退化为无空间处理的干声直通：场景 EQ/压缩/响度链全部保留，
+  // 只砍纯空间湿路。PC/TV 保持完整链。
   const hallMatrix = createMsMatrix(context)
-  const hallConvolver = context.createConvolver()
-  hallConvolver.buffer = generateReverbImpulseResponse(context, settings.effects.hall.type, settings.effects.hall.preDelay, settings.effects.hall.decay)
+  const hallConvolver: ConvolverNode | GainNode = lite
+    ? context.createGain()
+    : context.createConvolver()
+  if (!lite && 'buffer' in hallConvolver) {
+    (hallConvolver as ConvolverNode).buffer = generateReverbImpulseResponse(context, settings.effects.hall.type, settings.effects.hall.preDelay, settings.effects.hall.decay)
+  }
   const hallWetGain = context.createGain()
   hallWetGain.gain.value = 0
 
-  // 3D 环绕
-  const panner = context.createPanner()
-  panner.panningModel = 'HRTF'
-  panner.distanceModel = 'inverse'
-  // refDistance 必须跟随「近远」半径：默认 1m 与实际摆位半径（1.55-10.1m）叠加
-  // inverse 衰减，distance=5 时湿路被压 -14.5dB —— 开启 3D 即音量骤降十几 dB。
-  // 运行时在 applySurround3d 中同步 refDistance = radius，使摆位不改变响度。
-  panner.refDistance = 8
+  // 3D 环绕（lite：GainNode 直通占位）
+  const panner: PannerNode | GainNode = lite
+    ? context.createGain()
+    : context.createPanner()
+  if (!lite && 'panningModel' in panner) {
+    const pn = panner as PannerNode
+    pn.panningModel = 'HRTF'
+    pn.distanceModel = 'inverse'
+    // refDistance 必须跟随「近远」半径：默认 1m 与实际摆位半径（1.55-10.1m）叠加
+    // inverse 衰减，distance=5 时湿路被压 -14.5dB —— 开启 3D 即音量骤降十几 dB。
+    // 运行时在 applySurround3d 中同步 refDistance = radius，使摆位不改变响度。
+    pn.refDistance = 8
+  }
   const pannerWetGain = context.createGain()
   pannerWetGain.gain.value = 0
   const pannerDryGain = context.createGain()
@@ -723,6 +745,8 @@ export class AudioEffectsEngine {
 
   // 效果链（attach 时构建；EQ/频响补偿为动态插入段）
   private chain: BuiltEffectChain | null = null
+  /** 当前链是否 lite 降载构建（lite 下 hallConvolver/panner 为 GainNode 占位） */
+  private chainLite = false
 
   // 混响 IR 参数指纹（type|preDelay|decay）；仅参数变化才重建，
   // 避免拖动滑杆等热路径每次都重分配数 MB 脉冲缓冲区并引发可闻咔哒声
@@ -1116,8 +1140,12 @@ export class AudioEffectsEngine {
     masterGain.disconnect()
     masterGain.connect(normGain)
 
-    // 效果链
-    const chain = buildEffectChain(context, this.settings)
+    // 效果链（lite 降载：Android 触屏端跳过 HRTF PannerNode / ConvolverNode——
+    // 这两个节点即使 wet=0 也逐样本烧 RealtimeAudioWorker，实测 vivo 满核 96%。
+    // lite 下 3D 环绕/厅堂混响退化为干声直通，EQ/压缩/响度/夜间链完整保留。）
+    const liteChain = isAndroidTouchDeviceLite()
+    const chain = buildEffectChain(context, this.settings, liteChain)
+    this.chainLite = liteChain
     this.chain = chain
     this.input = chain.input
     // IR 已由 buildEffectChain 按当前设置生成，先记录指纹，避免随后 rebuildFromSettings 重复重建
@@ -1291,10 +1319,13 @@ export class AudioEffectsEngine {
     hall.sideGain.gain.setTargetAtTime(sideGain, t, 0.03)
     hall.centerGain.gain.setTargetAtTime(Math.max(0.4, centerGain), t, 0.03)
     this.chain.hallWetGain.gain.setTargetAtTime(Math.min(1, reverb / 10) * 0.95, t, 0.05)
-    // 混响类型/预延迟/衰减变化时重建 IR；参数未变则复用现有 buffer
+    // 混响类型/预延迟/衰减变化时重建 IR；参数未变则复用现有 buffer。
+    // lite 降载链的 hallConvolver 是 GainNode 占位（无 buffer 概念），跳过 IR 重建。
     const irKey = `${effects.hall.type}|${effects.hall.preDelay}|${effects.hall.decay}`
     if (irKey !== this.lastIrKey) {
-      this.chain.hallConvolver.buffer = generateReverbImpulseResponse(this.context, effects.hall.type, effects.hall.preDelay, effects.hall.decay)
+      if ('buffer' in this.chain.hallConvolver) {
+        (this.chain.hallConvolver as ConvolverNode).buffer = generateReverbImpulseResponse(this.context, effects.hall.type, effects.hall.preDelay, effects.hall.decay)
+      }
       this.lastIrKey = irKey
     }
 
@@ -1457,6 +1488,8 @@ export class AudioEffectsEngine {
   }
 
   private startSurroundRotation(): void {
+    // lite 降载链：panner 是 GainNode 占位（无 positionX/refDistance），不跑旋转动画
+    if (this.chain && !('positionX' in this.chain.panner)) return
     if (this.surroundAnimationFrame) return
     this.surroundLastTime = performance.now()
     const tick = (now: number) => {
@@ -1476,12 +1509,12 @@ export class AudioEffectsEngine {
       const baseAngle = this.settings.effects.surround3d.angle * Math.PI / 180
       const radius = 0.6 + this.settings.effects.surround3d.distance * 0.95
       // refDistance 跟随半径：inverse 衰减在 d=ref 处为 0dB，摆位不改变响度
-      if (this.chain.panner.refDistance !== radius) this.chain.panner.refDistance = radius
+      const p = this.chain.panner as PannerNode
+      if (p.refDistance !== radius) p.refDistance = radius
       this.surroundAngle += dt * speed * 2.6 * direction
       const a = this.surroundAngle + baseAngle
       const x = Math.sin(a) * radius
       const z = Math.cos(a) * radius
-      const p = this.chain.panner
       if (p.positionX) {
         p.positionX.setTargetAtTime(x, this.context!.currentTime, 0.03)
         p.positionZ.setTargetAtTime(z, this.context!.currentTime, 0.03)
@@ -1566,12 +1599,13 @@ export class AudioEffectsEngine {
     chain.hallMatrix.centerGain.gain.value = effects.hall.enabled ? Math.max(0.4, 1 - (effects.hall.level / 10) * 0.42) : 1
 
     // 3D 环绕（与 rebuildFromSettings 同步：干/湿增益 + 初始环绕位置）
+    // lite 降载链 panner 为 GainNode 占位：跳过 refDistance/positionX（字段不存在）
     chain.pannerWetGain.gain.value = effects.surround3d.enabled ? 1 : 0
     chain.pannerDryGain.gain.value = effects.surround3d.enabled ? 0 : 1
     const radius = 0.6 + effects.surround3d.distance * 0.95
-    chain.panner.refDistance = radius
+    if ('refDistance' in chain.panner) chain.panner.refDistance = radius
     const baseAngle = effects.surround3d.angle * Math.PI / 180
-    if (chain.panner.positionX) {
+    if ('positionX' in chain.panner && chain.panner.positionX) {
       chain.panner.positionX.value = Math.sin(baseAngle) * radius
       chain.panner.positionZ.value = Math.cos(baseAngle) * radius
       chain.panner.positionY.value = 0

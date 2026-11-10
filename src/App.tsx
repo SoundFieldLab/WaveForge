@@ -3589,6 +3589,18 @@ function App() {
     },
     handleAudioGraphReady,
     source => engineAdapterRef.current?.setPlaybackSource?.(source),
+    // Android 直通（2026-11-08 性能修复）：判定见下方 IIFE 注释。
+    // 直通判定（2026-11-08 修正）：v1 保存值不算数——历史安装曾默认写入 'v1'（用户从未
+    // 主动选过），且 v1 的远程原版效果在 Android 上没有服务可连，attach 仍会建一整条
+    // 效果链（EQ/压缩/响度节点）白烧 RealtimeAudioWorker（实测单核 66-96%）。只有用户
+    // 显式切到 v2/v3（本地引擎，调音室可见效果真实生效）才值得付音频图的成本。
+    androidTouchActive
+      && (() => {
+        try {
+          const saved = localStorage.getItem('waveforge:audio-engine-version')
+          return saved === null || saved === 'v1'
+        } catch { return true }
+      })(),
   )
   audioPlayerCacheControlRef.current = audioPlayer
 

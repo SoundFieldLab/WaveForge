@@ -305,12 +305,18 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
     transitionMode === 'gapless' ? { enabled: true, albumGapless: true } : { enabled: false, albumGapless: false }
   ), [transitionMode])
 
+  // Android 直通判定（2026-11-08 性能修复）：移动布局且音效场景为 off 时不建 WebAudio 图，
+  // deck 走系统 AudioTrack 直出（根除断续/变速/爆音）。场景非 off 或 PC-touch 布局（桌面
+  // App 树走 App.tsx 自己的 useAudioPlayer，不受此影响）正常建图。
+  const mobileBypassWebAudio = useMemo(() => (
+    document.documentElement.classList.contains('mobile-mode') && getMobileEffectsScene() === 'off'
+  ), [])
   const audioPlayer = useAudioPlayer(onStateChange, crossfadeSettings, gaplessSettings, undefined, (handle: import('../hooks/useAudioPlayer').AudioGraphHandle) => {
     // 音效引擎（v2，纯 Web Audio）：场景非 off 时接入音频图
     try {
       if (getMobileEffectsScene() !== 'off') attachMobileEffects(handle)
     } catch { /* 音效失败不影响播放 */ }
-  })
+  }, undefined, mobileBypassWebAudio)
   // 引擎 handle 每次渲染都是新对象（useAudioPlayer 返回未 memo 的字面量）：
   // 回调一律经 ref 取最新 handle，依赖只留 [audioPlayerRef]，身份才可能稳定。
   const audioPlayerRef = useRef(audioPlayer)

@@ -401,10 +401,19 @@ export function useAudioPlayer(
   },
   onAudioGraphReady?: (handle: AudioGraphHandle) => void,
   onPlaybackSourceChange?: (source: EnginePlaybackSource | null) => void,
+  /** Android 端 WebAudio 直通开关（2026-11-08 性能修复）：
+   *  true = 音效引擎在用（需要音频图），正常建图；
+   *  false = Android 触屏端且无音效 → 跳过建图，deck 走 element.volume 直出
+   *  （系统 AudioTrack 硬件时钟，CPU 占用≈0，WebAudio 量子断续/变速/爆音根除）。
+   *  用户在调音室开启音效时由 App 层翻转此值并重建图（toggleDirectOutputRebuild）。 */
+  bypassWebAudio?: boolean,
 ) {
   const primaryRef = useRef<HTMLAudioElement | null>(null)
   const secondaryRef = useRef<HTMLAudioElement | null>(null)
   const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null)
+  // Android 直通开关镜像（见参数注释）：ensureAudioGraph/过渡路径按此跳过建图
+  const bypassWebAudioRef = useRef(Boolean(bypassWebAudio))
+  bypassWebAudioRef.current = Boolean(bypassWebAudio)
   const activePrimaryRef = useRef(true)
   const onStateChangeRef = useRef(onStateChange)
   const crossfadeRef = useRef(crossfadeSettings)
@@ -710,6 +719,15 @@ export function useAudioPlayer(
   }, [isDeckRouted])
 
   const ensureAudioGraph = useCallback(async () => {
+    // Android 直通模式（2026-11-08 性能修复）：不建 WebAudio 图。
+    // 实测链路：deck 接入 MediaElementSource 后所有采样都走 RealtimeAudioWorker
+    // （vivo 实机单核 86-96%），叠加 MV 视频解码后 CPU 越限 → 音频量子断续，
+    // Chromium 用变速重采样硬填缺口 = 用户听到的「一卡一卡/加速减速/爆音」。
+    // 直通模式下 element 音量直接由系统 AudioTrack 出声（硬件时钟，零 JS 参与），
+    // setDeckGain 已按 isDeckRouted=false 自动退化为 element.volume 控制。
+    if (bypassWebAudioRef.current) {
+      return
+    }
     if (audioContextRef.current) {
       if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume().catch(() => undefined)
       return
@@ -1543,6 +1561,8 @@ export function useAudioPlayer(
           // Start transition progress tracking
           const transitionStartTime = performance.now()
           transitionStartTimeRef.current = transitionStartTime
+          // AudioContext 时钟锚点（后台安全）：见下方 updateTransitionProgress 注释
+          const transitionStartCtxTime = audioContextRef.current?.currentTime ?? null
           
           // Set transition state with progress tracking
           setTransitionState('running-transition', {
@@ -1557,13 +1577,22 @@ export function useAudioPlayer(
           })
           
           // Start progress animation for visual feedback
+          // ⚠️ 后台时钟修复（2026-11-08）：这条循环用 performance.now() 合成过渡时间线。
+          // 切后台后 rAF 停摆 → UI 时间冻结；ROM 偶发放出一帧时 elapsed 大步跳 →
+          // 进度/歌词猛跳（用户体感"后台一顿一顿/加速赶进度"）。现在用 AudioContext
+          // 时钟（音频线程驱动，后台照走）替代 performance.now() 做权威 elapsed；
+          // rAF 只负责把已推进的时间"画"出来——后台停帧只影响画面刷新频率，
+          // 不再累积时钟误差，回前台第一帧直接显示正确进度，无追赶跳变。
           let visualSwitchSent = false
+          const transitionStartCtx = audioContextRef.current?.currentTime ?? null
           const updateTransitionProgress = () => {
             if (executionRevision !== transitionExecutionRevisionRef.current || transitionStateRef.current !== 'running-transition') {
               return
             }
-            
-            const elapsed = (performance.now() - transitionStartTime) / 1000
+
+            const elapsed = transitionStartCtxTime !== null && audioContextRef.current
+              ? (audioContextRef.current.currentTime - transitionStartCtxTime)
+              : (performance.now() - transitionStartTime) / 1000
             const progress = Math.min(elapsed / transitionAudioDuration, 1)
             // 合成当前时间：过渡缓冲驱动时间线（AI 长混音超过源曲自然结尾时 timeupdate 会停）。
             // 起点必须加 playbackOffset（seek/快进触发时缓冲从中间开始），否则进度条会回跳到
@@ -1812,24 +1841,56 @@ export function useAudioPlayer(
                     // 重叠期不产生"两层"错位；随后 4s 内平滑减速到 1.0（此时缓冲已渐出
                     // 1/3 以上，速度差被渐出掩盖，不可闻）；最后 ~7s 保持原速与 deck 直接衔接。
                     // 用户要求"15-8 秒开始平滑减速、8 秒后衔接"——4s 同速 + 4s 减速 + 7s 原速。
+                    // ⚠️ 后台时钟修复（2026-11-08）：旧实现用 rAF + performance.now() 驱动
+                    // ramp——切后台后 WebView 主线程被 ROM（vivo fast_freezer 等）深度节流，
+                    // rAF 停摆导致 playbackRate 卡在变速值；系统偶发放出一帧时
+                    // performance.now() 大步跳进 → 速率瞬间拉到终点 = 用户听到的
+                    // "后台疯狂加速/减速"。改为锚定 deck 自身的播放时钟（deckStart 位置 +
+                    // deck.currentTime 换算 elapsed）：audio 元素时钟由音频硬件驱动，
+                    // 后台照走；主循环仍用 rAF 画平滑曲线（前台），后台恢复时按真实
+                    // elapsed 直接补设当前速率（一次跳变，落点正确，不再漂移）。
                     if (speedRatio !== 1) {
-                      const settleStart = performance.now()
-                      const syncHoldMs = Math.max(500, overlap * 1000 * (4 / 15))
-                      const decelMs = Math.max(500, overlap * 1000 * (4 / 15))
+                      const syncHoldS = Math.max(0.5, overlap * (4 / 15))
+                      const decelS = Math.max(0.5, overlap * (4 / 15))
+                      const totalS = syncHoldS + decelS
+                      const rateAtElapsed = (elapsed: number) => {
+                        if (elapsed <= syncHoldS) return speedRatio
+                        const p = Math.min(1, (elapsed - syncHoldS) / decelS)
+                        return speedRatio + (1 - speedRatio) * p
+                      }
+                      const deckStartPos = target.currentTime
+                      let lastPos = deckStartPos
+                      let elapsedS = 0
+                      let rafId: number | null = null
+                      const finishRamp = () => {
+                        if (rafId !== null) cancelAnimationFrame(rafId)
+                        rafId = null
+                        target.removeEventListener('pause', finishRamp)
+                      }
+                      target.addEventListener('pause', finishRamp, { once: true })
                       const rampPlaybackRate = () => {
-                        if (handedOff || executionRevision !== transitionExecutionRevisionRef.current) return
-                        const t = performance.now() - settleStart
-                        if (t < syncHoldMs) {
-                          target.playbackRate = speedRatio
-                          requestAnimationFrame(rampPlaybackRate)
+                        if (handedOff || executionRevision !== transitionExecutionRevisionRef.current) { finishRamp(); return }
+                        if (target.paused) { finishRamp(); return }
+                        // 锚定 deck 时钟积分：每帧用「上一帧写入的速率」把位置增量换算成
+                        // 时间增量累加（速率是我们自己设置的，已知量，积分无漂移）。
+                        // 后台 rAF 停摆期间位置照走，恢复第一帧一次性把积压增量补进
+                        // elapsed —— 落点正确、单次跳变，不再出现后台疯狂变速。
+                        const pos = target.currentTime
+                        elapsedS = Math.min(totalS, elapsedS + Math.max(0, pos - lastPos) / Math.max(0.05, target.playbackRate))
+                        lastPos = pos
+                        const desired = rateAtElapsed(elapsedS)
+                        if (Math.abs(target.playbackRate - desired) > 0.002) {
+                          try { target.playbackRate = desired } catch { /* 部分编码不支持，忽略 */ }
+                        }
+                        if (elapsedS >= totalS) {
+                          try { target.playbackRate = 1 } catch { /* 忽略 */ }
+                          finishRamp()
                           return
                         }
-                        const p = Math.min(1, (t - syncHoldMs) / decelMs)
-                        target.playbackRate = speedRatio + (1 - speedRatio) * p
-                        if (p < 1) requestAnimationFrame(rampPlaybackRate)
+                        rafId = requestAnimationFrame(rampPlaybackRate)
                       }
-                      requestAnimationFrame(rampPlaybackRate)
-                      debugLog(`🎛️ [Transition] deck playbackRate ${speedRatio.toFixed(3)}（先同速 ${(syncHoldMs / 1000).toFixed(1)}s 再平滑减速 ${(decelMs / 1000).toFixed(1)}s → 1.0，避免重叠期双重奏）`)
+                      rafId = requestAnimationFrame(rampPlaybackRate)
+                      debugLog(`🎛️ [Transition] deck playbackRate ${speedRatio.toFixed(3)}（先同速 ${syncHoldS.toFixed(1)}s 再平滑减速 ${decelS.toFixed(1)}s → 1.0，deck 时钟锚定，后台不脱轨）`)
                     }
                     debugLog('   目标轨道提前播放，位置:', target.currentTime.toFixed(2), 's')
                   } catch (err) {
@@ -2082,14 +2143,17 @@ export function useAudioPlayer(
           runFallbackFade: runFallbackGainAnimation,
         })
         
-        // 启动视觉过渡进度追踪
+        // 启动视觉过渡进度追踪（gapless 仅 0.4s 视觉动画；同样锚定 ctx 时钟防后台漂移）
         let visualSwitchSent = false
+        const gaplessStartCtx = audioContextRef.current?.currentTime ?? null
         const updateVisualProgress = () => {
           if (executionRevision !== transitionExecutionRevisionRef.current || transitionStateRef.current !== 'running-transition') {
             return
           }
-          
-          const elapsed = (performance.now() - transitionStartTime) / 1000
+
+          const elapsed = gaplessStartCtx !== null && audioContextRef.current
+            ? (audioContextRef.current.currentTime - gaplessStartCtx)
+            : (performance.now() - transitionStartTime) / 1000
           const progress = Math.min(elapsed / visualDuration, 1)
           // 与交叉淡化路径一致：过渡期间 timeupdate 被抑制，这里补发源曲 deck 的合成时间，
           // 避免进度条在过渡窗口内冻结（gapless 仅 0.4s，属兜底一致性）。
@@ -2161,14 +2225,17 @@ export function useAudioPlayer(
         return
       }
       
-      // 启动进度追踪动画
+      // 启动进度追踪动画（交叉淡化路径；锚定 ctx 时钟防后台时钟脱节，同上）
       let visualSwitchSent = false
+      const xfadeStartCtx = audioContextRef.current?.currentTime ?? null
       const updateTransitionProgress = () => {
         if (executionRevision !== transitionExecutionRevisionRef.current || transitionStateRef.current !== 'running-transition') {
           return
         }
-        
-        const elapsed = (performance.now() - transitionStartTime) / 1000
+
+        const elapsed = xfadeStartCtx !== null && audioContextRef.current
+          ? (audioContextRef.current.currentTime - xfadeStartCtx)
+          : (performance.now() - transitionStartTime) / 1000
         const progress = Math.min(elapsed / audioDuration, 1)
         // 时间线合成：running-transition 期间 handleTimeUpdate 被抑制，而交叉淡化路径原本只发
         // transitionProgress ⇒ 进度条/已播时间整段冻结、commit 时一次性跳变（用户可见"卡住再跳"）。

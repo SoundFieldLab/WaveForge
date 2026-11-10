@@ -247,12 +247,31 @@ export function FoliaLyricsPage({
       const dtHeard = last === 0 ? null : (now - last) / 1000
       last = now
       const snapshot = playbackTimeStore.getSnapshot()
-      beatFxFeedRef.current?.tick(snapshot.isPlaying ? snapshot.currentTime : null)
+      // 暂停或页面不可见时停帧：beatFx 只有播放中才有可见动作，
+      // 暂停态持续 60fps 自续（旧实现）会在手机端常驻烧一整个渲染核
+      if (!snapshot.isPlaying || document.visibilityState !== 'visible') {
+        raf = 0
+        return
+      }
+      beatFxFeedRef.current?.tick(snapshot.currentTime)
       void dtHeard
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    // 可见性/播放恢复重启：hidden→visible 或暂停→播放后确定性恢复循环
+    const restart = () => {
+      if (document.visibilityState === 'visible' && raf === 0) {
+        last = 0
+        raf = requestAnimationFrame(tick)
+      }
+    }
+    document.addEventListener('visibilitychange', restart)
+    const unsub = playbackTimeStore.subscribe(restart)
+    return () => {
+      document.removeEventListener('visibilitychange', restart)
+      unsub?.()
+      cancelAnimationFrame(raf)
+    }
   }, [active, playbackTimeStore])
 
   // ── 播放时间 → MotionValue（rAF 外推）──

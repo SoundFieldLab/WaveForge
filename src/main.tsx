@@ -98,6 +98,28 @@ document.addEventListener('dragstart', event => {
   if (target && typeof target.closest === 'function' && target.closest('img')) event.preventDefault()
 }, true)
 
+// Android 触屏端禁用原生 contextmenu（2026-11-08）：触屏长按 500ms 会触发系统级
+// contextmenu 事件，桌面端设计的「右键歌曲菜单」被误触发——用户点/按屏幕频繁弹出
+// 播放菜单（实测 vivo 长按 800ms 必现）。移动端没有鼠标右键语义，一律拦截；
+// 桌面 Electron / TV 遥控不受影响。pointerType==='touch' 精确拦截触屏来源，
+// 鼠标右键（桌面调试）保留。
+document.addEventListener('contextmenu', event => {
+  try {
+    const pe = event as PointerEvent
+    if (pe.pointerType === 'touch') {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+  } catch { /* 无 pointerType 的老事件对象：按来源兜底 */ }
+  // 兜底：Android WebView 里没有鼠标硬件时（maxTouchPoints>0 且无 hover 精确指针）全部拦截
+  if (document.documentElement.classList.contains('pc-touch') || document.documentElement.classList.contains('mobile-mode')) {
+    if (navigator.maxTouchPoints > 0 && !window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      event.preventDefault()
+    }
+  }
+}, true)
+
 // ── AutoMix 桥自检（诊断用）：确认 window.electron 真实可用性 ──
 // 若 preload 未加载，isDesktop() 会误判为 web 并装桩（render 抛"仅桌面版可用"、
 // 无 automixLog/analysis）→ automix 永远交叉。此标记写入 localStorage 便于读取。
