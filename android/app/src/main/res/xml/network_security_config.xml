@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 网络安全配置（manifest android:networkSecurityConfig 引用）。
+     WaveForge 的局域网能力依赖明文 HTTP：本机 nodejs-mobile 后端（127.0.0.1:3001）、
+     手机端作为遥控器连 PC 端本地服务（LAN IP），音乐/MV 资产也走局域网流。
+     targetSdk >= 28 默认禁明文，这里按需放行（仅限本应用域内，不影响系统其它流量）。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

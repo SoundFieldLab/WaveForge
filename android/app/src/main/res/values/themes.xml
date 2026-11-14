@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WaveForge 应用主题：无标题栏（全屏自绘 UI）。
+     2026-10-24 触摸 UI 批次把 manifest 从框架 @android:style 切到命名样式，
+     本文件是该引用的落地实现（CI AAPT 曾因本文件缺失报 resource not found）。 -->
+<resources>
+    <style name="Theme.WaveForge" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
+</resources>

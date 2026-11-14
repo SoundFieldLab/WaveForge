@@ -76,7 +76,9 @@ tv-license.json
 wf-screen-check.png
 
 # 大型构建产物（不纳入 git 版本管理）
-android/
+# ⚠️ android/ 的构建产物由 android/.gitignore 精确覆盖（/app/build/ 等）。
+#    此处曾误写整棵 `android/`（2026-10-24 起 android/ 新源文件被静默忽略，
+#    导致 themes.xml / network_security_config.xml 漏提交 → CI AAPT 挂），勿再写回。
 python-beat-service/packages/
 
 # 密钥与本地测试凭据
