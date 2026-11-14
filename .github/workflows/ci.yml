@@ -102,6 +102,13 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
 
+      # Chaquopy 17 构建期需要与 android/app/build.gradle.kts 里 version="3.13" 同版本的
+      # Python 解释器进 PATH（ubuntu-latest 自带 3.12，Chaquopy 会直接报版本不匹配）。
+      - name: 安装 Python 3.13（Chaquopy 构建期依赖）
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: 构建 APK
         run: cd android && ./gradlew assembleDebug --no-daemon
 
