@@ -116,14 +116,24 @@ jobs:
           ./gradlew assembleDebug --no-daemon > gradle-ci.log 2>&1
           status=$?
           set -e
-          # 失败时把 gradle 尾部日志写入 Step Summary（公共仓库可匿名读取，便于无 gh 环境排障）
+          # 失败时把关键报错段逐行转成 ::error:: annotations（公共仓库匿名可读，
+          # 便于无 gh/token 环境排障），完整日志另传 artifact
           if [ $status -ne 0 ]; then
+            grep -n -A 40 "What went wrong" gradle-ci.log | head -n 60 | sed 's/^/::error::/' || true
             echo "### Gradle 构建失败（尾部 250 行）" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             tail -n 250 gradle-ci.log >> "$GITHUB_STEP_SUMMARY" || true
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $status
+
+      - name: 上传 gradle 日志（排障用）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-ci-log
+          path: android/gradle-ci.log
+          if-no-files-found: ignore
 
       - name: 上传 APK（可下载）
         uses: actions/upload-artifact@v4
