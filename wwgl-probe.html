@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>WWGL Probe — WebWallGL 集成验证</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #101418; overflow: hidden; }
+    #wp { position: fixed; inset: 0; }
+    #hud {
+      position: fixed; top: 8px; left: 8px; z-index: 10;
+      font: 12px/1.5 Consolas, monospace; color: #cfe8ff;
+      background: rgba(0, 0, 0, 0.55); padding: 6px 10px; border-radius: 6px;
+      pointer-events: none; white-space: pre-wrap; max-width: 60vw;
+    }
+    #hud.err { color: #ff9c9c; background: rgba(60, 0, 0, 0.75); }
+  </style>
+</head>
+<body>
+  <div id="wp"></div>
+  <div id="hud">booting…</div>
+  <script type="module">
+    const hud = document.getElementById('hud')
+    const setHud = (text, isErr = false) => {
+      hud.textContent = text
+      hud.className = isErr ? 'err' : ''
+    }
+    const qs = new URLSearchParams(location.search)
+    const id = qs.get('id') || '3632513108'
+    // &server=same（默认）走 3020 同源代理 → 3001；&server=abs 直连独立实例（&port=，默认 3019）
+    const absPort = qs.get('port') || '3019'
+    const base = qs.get('server') === 'abs'
+      ? `http://127.0.0.1:${absPort}/api/wallpaper-engine/scene/wwgl/${id}`
+      : `/api/wallpaper-engine/scene/wwgl/${id}`
+    const w = Number(qs.get('w')) || 1600
+    const h = Number(qs.get('h')) || 900
+    const props = qs.get('props') ? JSON.parse(qs.get('props')) : undefined
+
+    const t0 = performance.now()
+    try {
+      const { mount, httpSource } = await import('https://cdn.jsdelivr.net/npm/webwallgl/+esm')
+      setHud(`webwallgl loaded @ ${Math.round(performance.now() - t0)}ms\nmounting ${id} …`)
+      const inst = await mount(document.getElementById('wp'), {
+        source: httpSource(base),
+        properties: props,
+        autoplay: true,
+      })
+      window.__wwgl = inst
+      setHud(`OK ${id}\nmount=${Math.round(performance.now() - t0)}ms`)
+      // 挂到 window 供截图脚本判断就绪（_shot.cjs 约定 __weProbeReady）
+      window.__weProbeReady = true
+    } catch (error) {
+      console.error(error)
+      window.__weProbeReady = 'fail'
+      window.__wwglError = String(error && error.stack || error)
+      setHud(`FAIL\n${String(error && error.stack || error)}`, true)
+    }
+  </script>
+</body>
+</html>

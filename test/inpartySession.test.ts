@@ -655,6 +655,8 @@ describe('In Party 成就系统', () => {
   it('解锁/幂等/弹窗事件 + 计数成就', async () => {
     const { unlockAchievement, isAchievementUnlocked, bumpCounter } =
       await import('../src/features/inparty/achievements')
+    // 成就已整体迁入全局注册表：定义/存档走 achievements/core，
+    // 弹窗通知经 inparty/achievements 的 re-export（其源头是 achievements/ToastLayer）。
     const { getAchievementDef, readUnlockedRecords } = await import('../src/achievements/core')
     const { notifyAchievement } = await import('../src/features/inparty/achievements')
     const id = 'first-room'

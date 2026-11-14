@@ -7,6 +7,7 @@ import {
   Film,
   Home,
   Languages,
+  ListMusic,
   MessageCircle,
   MoreHorizontal,
   Music,
@@ -27,9 +28,19 @@ import { hasTrueWordTiming, prepareLyricWords } from '../utils/lyricWordTiming'
 import { getAgentTintColor, getAppleMusicSettings } from '../services/appleMusic'
 import QuickSettings from './QuickSettings'
 import {
+  buildLineGlyphs,
+  buildRomanWordSpans,
+  easeInOutCubic,
+  ENTER_BLUR_PX,
   evalCurve,
+  glowEnvelope,
+  LB_AFTERGLOW,
   LB_EASING,
   LB_THRESHOLD,
+  lineEnterFactor,
+  MODENG_GLOW_GAIN,
+  romanWordColor,
+  type ModengRomanSpan,
 } from './modengLyricMotion'
 import {
   AutomixHudBadge,
@@ -43,8 +54,14 @@ export type { AutomixHudInfo } from './AutomixHudBadge'
 /**
  * 摩登模式音量条显隐持久化 key（仅本模式使用，与其他歌词模式完全隔离）。
  * 默认显示；用户可通过音量条右上角的切换按钮关闭，下次进入仍记忆。
+ * 快捷设置面板（外观 → 界面与背景 → 音量条显示）改的是同一个 key。
  */
 const MODENG_VOLUME_BAR_VISIBLE_KEY = 'waveforge_modeng_volume_bar_visible'
+/**
+ * 音量条显隐的跨组件广播：面板只落盘 + 广播（`detail` = 目标可见性），
+ * 播放页接住即时生效 —— 与 `waveforge:modeng-side-align` 同款分工。
+ */
+const MODENG_VOLUME_BAR_EVENT = 'waveforge:modeng-volume-bar'
 /**
  * 摩登模式翻译显示持久化 key（与全局 translationEnabled 隔离，切到其他歌词模式不影响）。
  * 首次进入时以 props.translationEnabled 作为默认，之后仅记忆本模式用户选择。
@@ -118,6 +135,8 @@ interface ModengPlayerPageProps {
   onRomanToggle?: () => void
   /** 打开评论弹窗回调（点击右下角评论按钮） */
   onOpenComments?: () => void
+  /** 打开「当前播放列表」面板回调（右下角按钮，与翻译/罗马音同组 chip）。未传入时按钮禁用。 */
+  onOpenPlaylist?: () => void
   /** 回到主页回调（左下角 Home 按钮） */
   onHomeClick?: () => void
   /** MV 背景开关回调 + 当前启用态（左下角 MV 按钮，与全局设置同步） */
@@ -231,10 +250,12 @@ const REDUCED_MOTION =
   window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
 // 逐字/逐行辅助混色常量（按 LyricsBlossom renderLine 反汇编）
-//   已唱词 saveLayerAlpha：fadeOut = clamp01(1 - wordAnim)，
-//   仅当 (1 - wordAnim) < 0.985 时才通过颜色回退让"刚唱完的字"快速从高亮色
-//   回退到中性灰——对应 0x2F7C3E "0.985" 阈值指令。
-const SUNG_FADE_THRESH = LB_THRESHOLD.sungFade
+//   已唱词 saveLayerAlpha：fadeOut = clamp01(1 - wordAnim)。
+// ▼ 2026-10-01 改动：原实现把 sung → unsung 的回退窗口挂在词进度的最后 1.5%
+//   （0x2F7C3E 的 "0.985" 阈值）上 —— 一个 0.3s 的词只有 4.5ms，实机观感是"唱完瞬间啪地变灰"。
+//   现改为**时间驱动**：字形唱完后按 LB_AFTERGLOW 在 0.42s 内三次缓动完成同样 35% 的回退，
+//   起点（刚唱完）与 sung 色无缝衔接，字尾因此拖出一道渐隐余晖（手感取自 folia 的 passed 档）。
+//   `LB_THRESHOLD.sungFade` 仍保留在动画底座里，仅作逆向规格留档，不再作为动画门控。
 
 interface SizedWord {
   text: string
@@ -289,6 +310,7 @@ export default function ModengPlayerPage({
   onTranslationToggle,
   onRomanToggle,
   onOpenComments,
+  onOpenPlaylist,
   onHomeClick,
   onMvBackgroundToggle,
   mvBackgroundEnabled = false,
@@ -370,6 +392,12 @@ export default function ModengPlayerPage({
       return next
     })
   }
+  // 快捷设置面板的同一个开关：面板负责落盘，这里只接住广播改状态（不重复写盘）。
+  useEffect(() => {
+    const onChange = (e: Event) => setVolumeBarVisible((e as CustomEvent<boolean>).detail !== false)
+    window.addEventListener(MODENG_VOLUME_BAR_EVENT, onChange as EventListener)
+    return () => window.removeEventListener(MODENG_VOLUME_BAR_EVENT, onChange as EventListener)
+  }, [])
 
   // "是否有翻译/罗马音"：上层传了就用传入值（App 用全局判定），没传则按歌词推导。
   // 推导是必要的兜底——缺了它按钮会被误判成"没有内容"而禁用/置灰，用户点不动。
@@ -466,6 +494,12 @@ export default function ModengPlayerPage({
   const rightX = leftPad + coverSize + 120 * s
 
   const lineWords = useMemo(() => lyrics.map(buildLineWords), [lyrics])
+  // 逐字形（grapheme）时间窗：与 lineWords 同序（同一 `prepareLyricWords` 词序）。
+  //   仅「有真实逐字数据」的行非空；空数组 → 该行走既有的整词/整行推进路径。
+  const lineGlyphs = useMemo(() => lyrics.map(buildLineGlyphs), [lyrics])
+  // 罗马音逐词时间窗（2026-10-03）：把 line.romanWords 对齐到主歌词的词时间窗。
+  //   仅「有真实逐字数据且能定位主歌词词」的行非空；空数组 → 该行罗马音走原先的静态整行渲染。
+  const lineRomanSpans = useMemo(() => lyrics.map(buildRomanWordSpans), [lyrics])
 
   // ---- 封面采色：提取封面主色，用于驱动背景光晕色（startY 渐进模糊 + 主色脉动）----
   //      仅在摩登模式生效；从 <img> 封面通过 canvas 像素采样，得到饱和主色与暗色副色。
@@ -580,30 +614,38 @@ export default function ModengPlayerPage({
   const unsungColorParsed = dark
     ? { r: 235, g: 235, b: 245, a: 0.627 }
     : { r: 60, g: 60, b: 67, a: 0.588 }
-  const mixWordColor = (tRaw: number, agent?: string) => {
+  /**
+   * 字形/词的混色。
+   * @param tRaw            演唱进度 0..1（= (t - start) / (end - start)）
+   * @param agent           对唱演唱者（决定色调）
+   * @param sinceWordEndSec 该字（词）**唱完**之后经过的秒数（0 = 尚未唱完）
+   */
+  const mixWordColor = (tRaw: number, agent?: string, sinceWordEndSec = 0) => {
     const tClamped = clamp01(tRaw)
-    // —— saveLayerAlpha 已唱淡出（逆向 §2.2 0x2F7C7E "0.985" 阈值）：
-    //    prog > 0.985 时，颜色从 sung 色向 unsung 色做 35% 回退（不透明度不变，
-    //    纯颜色通道回退），等价于 Skia saveLayerAlpha(alpha) 重绘让"刚唱完的字"
-    //    从高亮白/黑快速回到中性灰半透明。用颜色而非 opacity 实现，避免与
-    //    enterAlpha 的 opacity 写入冲突。
-    if (tClamped > SUNG_FADE_THRESH) {
-      const windowP = clamp01((tClamped - SUNG_FADE_THRESH) / (1 - SUNG_FADE_THRESH))
-      const retreat = 0.35 * windowP // sung → unsung 回退 35%
-      const tintVal = duetUnsungColor(agent)
-      const fromBase = tintVal ? parseRgba(tintVal) : unsungColorParsed
-      const sungBase = tintVal ? parseRgba(tintVal) : sungColorParsed
-      // 从 sung 色向 unsung 色插值 retreat 比例
-      const r = Math.round(sungBase.r + (fromBase.r - sungBase.r) * retreat)
-      const g = Math.round(sungBase.g + (fromBase.g - sungBase.g) * retreat)
-      const b = Math.round(sungBase.b + (fromBase.b - sungBase.b) * retreat)
-      const a = sungBase.a + (fromBase.a - sungBase.a) * retreat
-      return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`
-    }
-    // 逐词线性混色：逆向确认 renderLine 不做缓动 —— mixColor(from, to, t)（0x15CAF0）
-    //   直接以该词的演唱进度 t 做 ARGB 逐通道线性插值，故这里不加 easeOut 变形。
-    const t = tClamped
     const tint = duetUnsungColor(agent)
+
+    // —— 1. 尾焰（afterglow，2026-10-01 起为时间驱动）——
+    //    保留 LyricsBlossom saveLayerAlpha 的语义与幅度（sung → unsung 回退 35%），
+    //    但驱动量从「词进度最后 1.5%」换成「唱完后的秒数」：0.42s 三次缓动，起点导数为 0
+    //    → 与唱完瞬间的 sung 色无缝衔接，字尾拖出一道渐隐余晖（手感取自 folia 的 passed 档）。
+    //    用颜色而非 opacity 实现，避免与 enterAlpha 的 opacity 写入冲突。
+    if (tClamped >= 1 && sinceWordEndSec > 0) {
+      const retreat = LB_AFTERGLOW.amount
+        * easeInOutCubic(clamp01(sinceWordEndSec / LB_AFTERGLOW.duration))
+      if (retreat > 0.001) {
+        const fromBase = tint ? parseRgba(tint) : unsungColorParsed
+        const sungBase = tint ? parseRgba(tint) : sungColorParsed
+        // 从 sung 色向 unsung 色插值 retreat 比例
+        const r = Math.round(sungBase.r + (fromBase.r - sungBase.r) * retreat)
+        const g = Math.round(sungBase.g + (fromBase.g - sungBase.g) * retreat)
+        const b = Math.round(sungBase.b + (fromBase.b - sungBase.b) * retreat)
+        const a = sungBase.a + (fromBase.a - sungBase.a) * retreat
+        return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`
+      }
+    }
+    // —— 2. 演唱中：线性混色。逆向确认 renderLine 不做缓动 —— mixColor(from, to, t)（0x15CAF0）
+    //    直接以该字（词）的演唱进度 t 做 ARGB 逐通道线性插值，故这里不加 easeOut 变形。
+    const t = tClamped
     if (!tint) {
       // 未唱 alpha（暗 0.627 / 亮 0.588）→ 已唱 alpha，线性插值
       const a0 = unsungColorParsed.a
@@ -621,6 +663,13 @@ export default function ModengPlayerPage({
   // ---- 时间驱动：rAF 推进逐词混色 / 行弹簧动画 / 节拍背景 / 进度条 / 时间标签 ----
   // 高刷屏限 120fps：所有进度按真实时间计算，跳帧不影响正确性（纯时间推导，无累积误差）
   const wordColorRefs = useRef(new Map<string, HTMLSpanElement>())
+  // 字形（grapheme）级 DOM 引用：key = `g{行}-{词}-{字形}`。当前行且该词有字形数据时，
+  //   rAF 只写这些字形（词级引用退居兜底），从而支持"同一词内多字依次点亮"。
+  const glyphColorRefs = useRef(new Map<string, HTMLSpanElement>())
+  // 罗马音逐词 DOM 引用：key = `r{行}-{词}`。2026-10-03 起当前行的罗马音也随演唱进度
+  //   逐词点亮（对齐 Apple Music / folia：罗马音与主歌词同拍推进，只是端点更收敛）。
+  //   只有**当前行**且该行有对齐成功的罗马音时间窗时才写；否则退回静态整行渲染。
+  const romanWordRefs = useRef(new Map<string, HTMLSpanElement>())
   // Apple 背景和声（ttm:role="x-bg"）：主行下方的小字行，与主行同时逐字点亮
   const bgVocalWordRefs = useRef(new Map<string, HTMLSpanElement>())
   const bgVocalRowRefs = useRef(new Map<string, HTMLDivElement>())
@@ -648,8 +697,9 @@ export default function ModengPlayerPage({
   //   - 主段：三点"一起呼吸"（完全同相位，零错峰）。
   //   - 退场：临近下一句错峰消点（3→2→1→开唱）；若间奏太短来不及点满三点则按时间显示到哪算哪。
   const interludeRef = useRef({ visible: false, remain: 0, gap: 0, fadeIn: 0, startedAt: 0 })
-  // 当前正在唱的字 index（远程 rAF 用它做"切字时重置前一字"的簿记；-1 = 无）
-  const activeWordIdxRef = useRef(-1)
+  // 当前正在唱的字形 key（`g行-词-字形`；'' = 无）。辉光只挂在这一个字形上，
+  //   字形切换时清掉上一字形的 text-shadow —— 任一时刻最多一个光点，逐字对比不会被冲淡。
+  const activeGlyphKeyRef = useRef('')
 
   useEffect(() => {
     let raf = 0
@@ -679,26 +729,47 @@ export default function ModengPlayerPage({
       //    保证逐词循环与行级 forEach 用同一个 idx，消除 React commit DOM 后、
       //    useEffect 重建 rAF 闭包前的 1 帧不同步（白屏根因）。
       const ci = springCurrIdxRef.current
-      // —— 1. 逐词高亮（回归 LyricsBlossom 实机：每词整字 ARGB 线性插值）——
-      //   rAF 每帧直接写 el.style.color = mixWordColor(prog)，整字变色。
-      //   用户 2026-09-12 提供的 LyricsBlossom 截图显示：当前行由整字明亮与整字暗淡交替组成，
-      //   没有 background-clip:text 那种把单字竖着切开的渐变；中文单字被竖切尤其违和。
-      //   保留 sung→unsung 35% 回退（saveLayerAlpha 语义，LyricsBlossom 实机行为），
-      //   刚唱完的字会轻微回退到 unsung，让下一词的高亮更突出。
+      // —— 1. 逐字形高亮（LyricsBlossom 整字 ARGB 线性混色 + folia 逐字推进）——
+      //   基础身份不变：整字做 ARGB 线性插值，不做 background-clip 渐变
+      //   （中文单字会被竖着切开，2026-09-12 实机截图已否掉该方案）。
+      //   2026-10-01 参考 folia classic 补两处：
+      //     ① 字形级推进 —— 有真实逐字数据时，每个字形按自己的时间窗独立混色，
+      //        同一词内多字不再齐亮，而是依次点亮（见 `lineGlyphs` / `buildLineGlyphs`）；
+      //     ② 单点流动辉光 —— 只有"正在唱的那一个字"承担 text-shadow，包络峰值在进度 30%
+      //        （folia glow 层 times:[0,0.3,1]），任一时刻最多一个光点。
+      //   尾焰（唱完后 35% 缓动回退）在 mixWordColor 内。
       const line = lyrics[ci]
+      let newActiveGlyphKey = ''
+      let newActiveGlyphProg = 0
       if (line) {
         const words = lineWords[ci] || []
-        // 正在唱的字下标（prog∈(0,1)）：下面"切字时重置前一字"要用（与远程实现同一判定）
-        let newActiveWord = -1
+        const glyphWords = lineGlyphs[ci] || []
         if (words.length > 0) {
           words.forEach((word, wordIndex) => {
             if (word.whitespace) return
+            const glyphs = glyphWords[wordIndex]
+            if (glyphs && glyphs.length > 0) {
+              glyphs.forEach((glyph, glyphIndex) => {
+                if (glyph.whitespace) return
+                const key = `g${ci}-${wordIndex}-${glyphIndex}`
+                const el = glyphColorRefs.current.get(key)
+                if (!el) return
+                const span = Math.max(0.001, glyph.endTime - glyph.startTime)
+                const prog = clamp01((t - glyph.startTime) / span)
+                if (prog > 0 && prog < 1) {
+                  newActiveGlyphKey = key
+                  newActiveGlyphProg = prog
+                }
+                el.style.color = mixWordColor(prog, line.agent, t - glyph.endTime)
+              })
+              return
+            }
+            // 该词没有字形级数据（如单字形词）：退回词级推进，行为与改动前一致。
             const el = wordColorRefs.current.get(`w${ci}-${wordIndex}`)
             if (!el) return
             const span = Math.max(0.001, word.endTime - word.startTime)
             const prog = clamp01((t - word.startTime) / span)
-            if (prog > 0 && prog < 1) newActiveWord = wordIndex
-            el.style.color = mixWordColor(prog, line.agent)
+            el.style.color = mixWordColor(prog, line.agent, t - word.endTime)
           })
         } else {
           // no_syllable 退化（无逐词数据）：整行按线性混色推进。
@@ -708,28 +779,69 @@ export default function ModengPlayerPage({
             el.style.color = mixWordColor(progRaw, line.agent)
           }
         }
-        if (newActiveWord !== activeWordIdxRef.current) {
-          // 切换字时把前一字 scale/填充 立即重置（避免回弹/渐变残留）
-          const prevIdx = activeWordIdxRef.current
-          if (prevIdx >= 0 && words[prevIdx] && !words[prevIdx].whitespace) {
-            const prevEl = wordColorRefs.current.get(`w${ci}-${prevIdx}`)
-            if (prevEl) {
-              prevEl.style.transform = 'translateZ(0) scale(1)'
-              // 清渐变填充：唱完的字应回实色(sung)，且必须去掉 text-fill:transparent 残留，
-              // 否则该字会以透明填充渲染（无底色）→ 不可见。
-              const prevPrevProg = clamp01(
-                (t - words[prevIdx].startTime) / Math.max(0.001, words[prevIdx].endTime - words[prevIdx].startTime),
-              )
-              prevEl.style.color = prevPrevProg >= 1
-                ? (dark ? 'rgba(255,255,255,1)' : 'rgba(28,28,30,0.95)')
-                : (duetUnsungColor(line.agent) ?? unsungColor)
-              prevEl.style.backgroundImage = 'none'
-              prevEl.style.backgroundClip = 'border-box'
-              prevEl.style.webkitBackgroundClip = 'border-box'
-              prevEl.style.webkitTextFillColor = ''
+
+        // —— 1b. 流动辉光：只给"正在唱的那一个字"上 text-shadow ——
+        //   包络取自 folia glow 层的 [none → glow → none]（峰值在进度 30%，先亮后收）；
+        //   半径用 em 表达（基准 0.42em / 0.83em）→ 随字号自动缩放，与 folia 20px/40px @48px 同比例。
+        //   因为任一时刻只有 1 个字带辉光，不会复现早期"整行白辉光叠加 → 整屏发白"的过曝。
+        //   字形切换时先把上一字形的 text-shadow 清空（并清掉 background-clip 残留的防御性重置）。
+        //   (无障碍) 减弱动态：不做辉光。
+        //
+        //   ▼ 2026-10-07：整体强度统一乘 `MODENG_GLOW_GAIN`（现 0.45，削弱约一半）。
+        //     依据 LyricsBlossom 实机录屏帧级量化 —— 其原生**无任何文字辉光**
+        //     （已唱字外 3px 环 vs 12px 环差 <1 灰度），本辉光是 folia 增强项，用户决定保留但削弱。
+        //     注意：**判定门槛 `GLOW_EPS` 比的是"原始包络"而非削弱后的值** —— 若拿削弱值去比，
+        //     光点的存活窗口会被 gain 一起缩小，字形尾部会更早断光、且可能整段不出辉光。
+        //     半径与 alpha 都乘同一个 gain，故 `MODENG_GLOW_GAIN = 0` 时半径与 alpha 同时归零 = 视觉关闭。
+        if (newActiveGlyphKey !== activeGlyphKeyRef.current) {
+          const prevGlowEl = activeGlyphKeyRef.current
+            ? glyphColorRefs.current.get(activeGlyphKeyRef.current)
+            : undefined
+          if (prevGlowEl) {
+            prevGlowEl.style.transform = 'translateZ(0) scale(1)'
+            prevGlowEl.style.textShadow = ''
+            prevGlowEl.style.backgroundImage = 'none'
+            prevGlowEl.style.backgroundClip = 'border-box'
+            prevGlowEl.style.webkitBackgroundClip = 'border-box'
+            prevGlowEl.style.webkitTextFillColor = ''
+          }
+          activeGlyphKeyRef.current = newActiveGlyphKey
+        }
+        if (newActiveGlyphKey) {
+          const glowEl = glyphColorRefs.current.get(newActiveGlyphKey)
+          if (glowEl) {
+            // 门槛比"原始包络"（削弱只改强弱，不缩短光点存活窗口，见上方 1b 注释）
+            const rawGlowK = REDUCED_MOTION ? 0 : glowEnvelope(newActiveGlyphProg)
+            if (rawGlowK > 0.02) {
+              const glowK = rawGlowK * MODENG_GLOW_GAIN
+              const tintHex = agentTintOf(line.agent)
+              const glowColor = tintHex
+                ? hexToRgba(tintHex, (dark ? 0.55 : 0.28) * MODENG_GLOW_GAIN)
+                : (dark
+                    ? `rgba(255,255,255,${(0.55 * MODENG_GLOW_GAIN).toFixed(3)})`
+                    : `rgba(28,28,30,${(0.26 * MODENG_GLOW_GAIN).toFixed(3)})`)
+              glowEl.style.textShadow =
+                `0 0 ${(0.42 * glowK).toFixed(3)}em ${glowColor}, 0 0 ${(0.83 * glowK).toFixed(3)}em ${glowColor}`
+            } else {
+              glowEl.style.textShadow = ''
             }
           }
-          activeWordIdxRef.current = newActiveWord
+        }
+
+        // —— 1b2. 罗马音逐词点亮（2026-10-03）——
+        //   与主歌词同一套「按时间窗线性混色 + 时间驱动尾焰」，只是端点换成 ROMAN_COLOR
+        //   （更收敛：暗色 0.40→0.86，而主行是 0.627→1.0），保持罗马音是辅助信息。
+        //   **不参与辉光**：主歌词那支「任一时刻最多 1 个光点」的纪律不能被罗马音破坏。
+        //   窗口为空（无逐字数据 / 罗马音与歌词切分对不上）→ 该行罗马音由 JSX 静态色渲染，这里不动。
+        const romanSpans = lineRomanSpans[ci] || []
+        if (romanSpans.length > 0) {
+          romanSpans.forEach((span: ModengRomanSpan, spanIndex: number) => {
+            const el = romanWordRefs.current.get(`r${ci}-${spanIndex}`)
+            if (!el) return
+            const spanSec = Math.max(0.001, span.endTime - span.startTime)
+            const prog = clamp01((t - span.startTime) / spanSec)
+            el.style.color = romanWordColor(prog, dark ? 'dark' : 'light', t - span.endTime)
+          })
         }
 
         // —— 1c. Apple 背景和声（TTML ttm:role="x-bg"）——
@@ -754,7 +866,15 @@ export default function ModengPlayerPage({
             if (!el) return
             const absStart = vocal.time + word.startTime / 1000
             const absEnd = absStart + Math.max(word.duration, 1) / 1000
-            el.style.opacity = t >= absEnd ? '0.95' : t >= absStart ? '0.72' : '0.32'
+            const spanSec = Math.max(0.001, absEnd - absStart)
+            // ▼ 2026-10-03 平滑化：原先三档硬跳（0.32 / 0.72 / 0.95）在 rAF 每帧覆写、
+            //   且 span 没有 transition —— 实机观感是和声"啪"地跳一级。改为连续三段插值，
+            //   三档**锚点值不变**（未唱 0.32 → 词内升到 0.72 → 唱完后 0.22s 再升到 0.95），
+            //   与主歌词/罗马音一样用 easeInOutCubic，起止无导数跳变。
+            const inWord = easeInOutCubic(clamp01((t - absStart) / spanSec))
+            const afterWord = easeInOutCubic(clamp01((t - absEnd) / 0.22))
+            const opacity = 0.32 + 0.40 * inWord + 0.23 * afterWord
+            el.style.opacity = Math.min(0.95, opacity).toFixed(3)
           })
         })
       }
@@ -770,9 +890,23 @@ export default function ModengPlayerPage({
       //     switchAt 会被刷新到当前墙钟、而锚点仍停在过去 → elapsed 变负 → 行 alpha 归零、
       //     整行不可见。逐词进度仍由播放时间 t 驱动，暂停时天然冻结，不受此影响。
       const switchSecFull = Math.max(0, (wall - switchAtRef.current) / 1000)
-      const expandK = evalCurve(LB_EASING.easeInOut, switchSecFull)              // 0.3s 展开放大
-      const expandFadeK = clamp01(switchSecFull / LB_EASING.expandFade.duration)  // 0.45s 放大行淡入
       const idx = springCurrIdxRef.current
+      // ▼ 2026-10-01 短行自适应（对齐 folia `renderHints` 的 micro / short 档）：
+      //   行本身很短（快速念白 / 密集短句）时，0.3s 展开 + 0.45s 淡入还没走完就已切到下一行，
+      //   观感是"刚要展开就被抽走"。按行的演唱时长等比压缩进入窗口，下限 0.45；
+      //   正常长度（≥0.7s）的行系数恒为 1 → 与改动前逐帧一致。
+      const enterLine = lyrics[idx]
+      const enterSungSec = enterLine
+        ? Math.max(0, (enterLine.endTime
+          ?? lineWords[idx]?.[lineWords[idx].length - 1]?.endTime
+          ?? (lyrics[idx + 1]?.time ?? enterLine.time + 1.5)) - enterLine.time)
+        : 1
+      const enterFactor = lineEnterFactor(enterSungSec)
+      const expandCurve = enterFactor >= 0.999
+        ? LB_EASING.easeInOut
+        : { ...LB_EASING.easeInOut, duration: LB_EASING.easeInOut.duration * enterFactor }
+      const expandK = evalCurve(expandCurve, switchSecFull)                        // 展开放大
+      const expandFadeK = clamp01(switchSecFull / Math.max(0.12, LB_EASING.expandFade.duration * enterFactor))
       // 给当前行打 .modeng-current；降级行必须清空 rAF 写过的内联残留（词色 /
       //   行级 CSS 变量），否则"已经唱过去的行"会一直挂着高亮色。
       lineDomRefs.current.forEach((el, k) => {
@@ -795,13 +929,32 @@ export default function ModengPlayerPage({
             w.style.removeProperty('--modeng-word-unsung')
             w.style.fontWeight = ''
           }
+          // 字形级内联残留（逐字混色 + 单点流动辉光）：
+          //   不清掉的话，降级行会继续挂着"已唱白"与辉光，和父级 lineColor(distance) 打架。
+          const glyphEls = el.querySelectorAll<HTMLElement>('.modeng-glyph')
+          for (let i = 0; i < glyphEls.length; i++) {
+            const gEl = glyphEls[i]
+            gEl.style.color = ''
+            gEl.style.textShadow = ''
+            gEl.style.transform = ''
+            gEl.style.backgroundImage = ''
+            gEl.style.backgroundClip = ''
+            gEl.style.webkitBackgroundClip = ''
+            gEl.style.webkitTextFillColor = ''
+          }
+          // 罗马音逐词内联残留（2026-10-03）：与字形同理 —— 降级行若不清掉，
+          //   会继续挂着 rAF 写进去的"已唱"高 alpha，与父级 lineColor(distance) 打架。
+          const romanEls = el.querySelectorAll<HTMLElement>('.modeng-roman-word')
+          for (let i = 0; i < romanEls.length; i++) romanEls[i].style.color = ''
           // 行级 CSS 变量清理
           el.style.removeProperty('--modeng-enter-y')
           el.style.removeProperty('--modeng-enter-scale')
           el.style.removeProperty('--modeng-enter-alpha')
+          el.style.removeProperty('--modeng-enter-blur')
           el.style.removeProperty('--modeng-leave-y')
           el.style.removeProperty('--modeng-leave-alpha')
           el.style.removeProperty('--modeng-next-y')
+          el.classList.remove('modeng-entering')
           el.classList.remove('modeng-current')
         } else {
           // 已是非 current：保留下次降级清理即可，每帧不做全扫描避免不必要的 DOM 查询
@@ -810,15 +963,27 @@ export default function ModengPlayerPage({
       })
       const currentLineEl = lineDomRefs.current.get(idx)
       if (currentLineEl) {
-        // 当前行进入：scale 走 ease-in-out 0.3s 从 0.88 展开到 1.0（展开放大钩子）；
-        //   alpha 走 0.45s 淡入（放大行淡入）；Y 从 +8px 上浮就位（rect 外扩 10px 的观感）。
-        //   (无障碍) 减弱动态：不做放大/上浮，只保留信息就位。
+        // 当前行进入：scale 走 ease-in-out 从 0.88 展开到 1.0（展开放大钩子）；
+        //   alpha 走放大行淡入；Y 从 +8px 上浮就位（rect 外扩 10px 的观感）。
+        //   (无障碍) 减弱动态：不做放大/上浮/模糊，只保留"就位"这一信息本质。
         const expandScale = REDUCED_MOTION ? 1 : 0.88 + 0.12 * expandK
         const enterAlpha = REDUCED_MOTION ? 1 : expandFadeK
         const enterY = REDUCED_MOTION ? 0 : 8 * s * (1 - expandK)
         currentLineEl.style.setProperty('--modeng-enter-y', `${enterY.toFixed(2)}px`)
         currentLineEl.style.setProperty('--modeng-enter-scale', expandScale.toFixed(4))
         currentLineEl.style.setProperty('--modeng-enter-alpha', enterAlpha.toFixed(4))
+        // ▼ 2026-10-01 行进入的"聚焦"过渡（对齐 folia classic line enter 的 blur(10px)→0）：
+        //   与缩放同步由 6px 收敛到 0。只在进入窗口内挂 .modeng-entering 并写变量，
+        //   窗口一结束立刻移除类与变量 —— 常驻 filter 会丢子像素抗锯齿、让字面发糊。
+        //   当前行不会同时命中 .modeng-blur-enabled（该类只挂在非当前行），两条 filter 规则互斥。
+        const enterBlur = REDUCED_MOTION ? 0 : ENTER_BLUR_PX * s * (1 - expandK)
+        if (enterBlur > 0.05) {
+          currentLineEl.classList.add('modeng-entering')
+          currentLineEl.style.setProperty('--modeng-enter-blur', `${enterBlur.toFixed(2)}px`)
+        } else {
+          currentLineEl.classList.remove('modeng-entering')
+          currentLineEl.style.removeProperty('--modeng-enter-blur')
+        }
       }
       // 相邻行错峰跟随（逆向行步长系数 0.04s，0x2F76F7 循环步长）：
       //   离当前行每远一行，波浪延后 0.04s 启动，位移幅度随距离衰减 —— 形成"涟漪向外扩散"。
@@ -1465,6 +1630,12 @@ export default function ModengPlayerPage({
           will-change: color;
           font-synthesis-weight: none;
         }
+        /* 字形（grapheme）—— 逐字推进 + 单点流动辉光的载体（2026-10-01）。
+           一行可能有几十个字形，刻意**不**加 will-change：逐元素提升图层反而更慢，
+           color / text-shadow 的变化用户代理自会处理。 */
+        .modeng-glyph {
+          font-synthesis-weight: none;
+        }
         /* 鼠标悬停在歌词区时，取消整列非当前行的模糊（LyricsBlossom 的"看清未播放歌词"手感）。
            CSS 直接 !important 覆盖行级 --modeng-line-blur 的 filter，零 JS / 零 React 重渲染。 */
         .modeng-lyric-list.modeng-hovering .modeng-line-wrap {
@@ -1498,6 +1669,13 @@ export default function ModengPlayerPage({
            变化的只有 --modeng-line-blur 值，浏览器只更新 filter 值不重走 transition。 */
         .modeng-blur-enabled > .modeng-line-wrap {
           filter: blur(var(--modeng-line-blur, 0px));
+        }
+        /* 行进入的"聚焦"过渡（2026-10-01，对齐 folia classic line enter 的 blur(10px)→0）：
+           只在进入窗口内由 rAF 挂 .modeng-entering 并写 --modeng-enter-blur；窗口一结束
+           （enterBlur ≤ 0.05px）即移除类与变量 —— 常驻 filter 会丢子像素抗锯齿、字面发糊。
+           当前行不会同时带 .modeng-blur-enabled（该类只挂非当前行），两条 filter 规则互斥。 */
+        .modeng-lyric-line.modeng-entering > .modeng-line-wrap {
+          filter: blur(var(--modeng-enter-blur, 0px));
         }
         /* enableScale：非当前行按距离的 scale 渐进（0.86→1.0，与 LINE_FADE 亮度同阶梯）。
            与行切换 enter-scale 叠加的思路：
@@ -2015,6 +2193,30 @@ export default function ModengPlayerPage({
               <Home style={{ width: 14 * s, height: 14 * s }} />
             </button>
             <div className="flex items-center" style={{ gap: 12 * s }}>
+              {/* 播放列表按钮：查看当前播放队列（App 层的 PlaylistPanel）。
+                  刻意放在**组首（最左）**：本组靠右对齐，插在组首不会移动既有 6 个按钮
+                  相对右缘的位置（保留用户对翻译/罗马音/…的既有肌肉记忆）。 */}
+              <button
+                type="button"
+                aria-label="播放列表"
+                disabled={!onOpenPlaylist}
+                onClick={e => {
+                  e.stopPropagation()
+                  onOpenPlaylist?.()
+                }}
+                title={onOpenPlaylist ? '查看播放列表' : '播放列表不可用'}
+                className="modeng-btn modeng-btn-chip flex items-center justify-center rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  width: 28 * s,
+                  height: 28 * s,
+                  background: c.chip,
+                  color: c.sub,
+                  zIndex: 4,
+                  pointerEvents: 'auto',
+                }}
+              >
+                <ListMusic style={{ width: 14 * s, height: 14 * s }} />
+              </button>
               {/* 翻译按钮：激活时使用高亮强调色；歌曲无翻译时置灰禁用 */}
               <button
                 type="button"
@@ -2197,6 +2399,12 @@ export default function ModengPlayerPage({
               const absDistance = Math.abs(distance)
               const isCurrent = distance === 0
               const words = lineWords[index]
+              // 字形级时间窗（2026-10-01）：仅当前行、且有真实逐字数据时才渲染字形子节点。
+              //   非当前行不渲染 → 长列表（几百行）DOM 规模与改动前完全一致。
+              const glyphWords = isCurrent ? lineGlyphs[index] : undefined
+              // 罗马音逐词时间窗（2026-10-03）：同样只在当前行渲染逐词 span，
+              //   非当前行不建 ref、不拆词 → 长列表 DOM 规模与改动前一致。
+              const romanSpans = isCurrent ? (lineRomanSpans[index] ?? []) : []
               const lineBaseColor = isCurrent
                 ? (duetUnsungColor(line.agent) ?? c.lineUnsungCurrent)
                 : lineColor(distance, line.agent)
@@ -2283,6 +2491,10 @@ export default function ModengPlayerPage({
                         style={{
                           fontSize: 17 * s,
                           fontWeight: 500,
+                          // 当前行统一用未唱色（比主歌词略淡一档）——与远程 2026-11 的
+                          // 「非当前行不渲染罗马音」改造一致；本地 2026-10-03 那条
+                          // 「不能走 lineColor(0)」的教训仍成立，只是由 unsungColor 取代了
+                          // 当时的 lineBaseColor。
                           color: duetUnsungColor(line.agent) ?? unsungColor,
                           letterSpacing: 0.5 * s,
                           lineHeight: 1,
@@ -2290,7 +2502,24 @@ export default function ModengPlayerPage({
                           opacity: 0.9,
                         }}
                       >
-                        {line.romanWords && line.romanWords.length > 0 ? (
+                        {romanSpans.length > 0 ? (
+                          // 当前行且有对齐好的逐词时间窗 → 逐词 span + ref，由 rAF 按各自时间窗点亮
+                          //   （2026-10-03，对齐 Apple Music / folia：罗马音与主歌词同拍推进）。
+                          romanSpans.map((span, si) => (
+                            <span
+                              key={`rs-${index}-${si}`}
+                              ref={el => {
+                                const romanKey = `r${index}-${si}`
+                                if (el) romanWordRefs.current.set(romanKey, el)
+                                else romanWordRefs.current.delete(romanKey)
+                              }}
+                              className="modeng-roman-word inline-block"
+                              style={{ marginRight: 0.5 * s }}
+                            >
+                              {span.text}
+                            </span>
+                          ))
+                        ) : line.romanWords && line.romanWords.length > 0 ? (
                           line.romanWords.map((rw, ri) => (
                             <span
                               key={`rw-${index}-${ri}`}
@@ -2342,7 +2571,28 @@ export default function ModengPlayerPage({
                               //   非当前行不写 inline style，走父 lineColor(distance) 继承。
                               style={isCurrent ? { color: wordInitialColor } : undefined}
                             >
-                              {word.text}
+                              {/* 字形（grapheme）拆分（2026-10-01，参考 folia classic）：
+                                  有真实逐字数据时把词再拆成字形，每个字形由 rAF 按**自己的**
+                                  时间窗做 ARGB 混色 → 同一词内多字依次点亮，而不是整词齐亮；
+                                  「正在唱」的字形再单独承担一层流动辉光（见 rAF 第 1b 段）。
+                                  无逐字数据 / 单字形时直接渲染词文本，行为与改动前一致
+                                  （它们本来就是同一个字的两种写法）。 */}
+                              {glyphWords && glyphWords[wordIndex]?.length
+                                ? glyphWords[wordIndex].map((glyph, glyphIndex) => (
+                                    <span
+                                      key={`g-${wordIndex}-${glyphIndex}`}
+                                      ref={el => {
+                                        const glyphKey = `g${index}-${wordIndex}-${glyphIndex}`
+                                        if (el) glyphColorRefs.current.set(glyphKey, el)
+                                        else glyphColorRefs.current.delete(glyphKey)
+                                      }}
+                                      className="modeng-glyph inline-block"
+                                      style={{ color: wordInitialColor }}
+                                    >
+                                      {glyph.text}
+                                    </span>
+                                  ))
+                                : word.text}
                             </span>
                           ),
                         )

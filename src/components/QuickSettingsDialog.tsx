@@ -114,6 +114,26 @@ const FOLIA_STYLE_ZH: Record<string, string> = Object.fromEntries(
  * 纯音乐下「歌词细节」「翻译与注音」整槽不渲染，编号仍是 01/02，不留空号。
  * 每槽控件数上限 3（理由见上方「为什么每槽必须 ≤3 个控件」）。
  *
+ * ## 设置项要按「当前歌词模式」过滤（2026-10-09，改面板前必读）
+ *
+ * **面板只显示当前歌词模式真正会读取的设置** —— 判定依据是源码里实际的消费方，
+ * 逐条对照表写在组件内 `supportsBackgroundLayer` 上方那段注释里。要点：
+ *
+ * - 背景类（背景效果 / 模糊程度 / 隐藏白条 / 封面律动）只留给**现代 · 沉浸式**：
+ *   摩登 / 墙纸 / 辉煌 / 多维 / Folia / PV 都自铺不透明背景把全局封面背景层盖住，
+ *   看歌（video）由 MV 接管。在那里给「模糊程度」等于给一个**面板预览会动、真机不动**
+ *   的假旋钮（用户 2026-10-09 反馈的原话是"无功能的进度条"）。
+ * - 歌词细节类（歌词大小 / 逐字歌词 / 风格样式 / 歌词高光）与「翻译位置」
+ *   只留给**现代 · 沉浸式 / 现代**：它们的消费方是同一个 `LyricsDisplay`。
+ * - 「实时频谱条」只在**现代**（App 里硬编码 `lyricDisplayMode === 'modern'`）。
+ * - 「音质快捷切换」挂在标准播放条上 → **摩登**没有播放条，隐藏。
+ * - **整槽被过滤空时，连槽带编号一起不渲染**（不要留空盒子、也不要连号补齐），
+ *   并且**栅格列数跟着本段可见槽数走**（`slotGridClass`）—— 写死 3 列的话，只剩 1 张卡的
+ *   分段（如摩登的外观段）会把卡片挤在左侧 1/3、右侧空掉 2/3（用户 2026-10-09 截图反馈）。
+ *   列数只由「当前分段 + 当前歌词模式」决定，所以拖动滑块 / 切背景效果都不会让列数抖动。
+ * - 新增歌词模式时必须显式补 `supportsXxx`，默认是**不显示**；
+ *   若该模式确实还有可放的外观项（如摩登的音量条显隐），补进 01 卡而不是空着。
+ *
  * ### 版式上的易错点（改前先看）
  *
  * 1. **键位网格必须限宽**：`renderPresetGroup` 传 `columns` 时同时给 `maxWidth`。只写
@@ -408,6 +428,20 @@ export default memo(function QuickSettingsDialog({
     window.dispatchEvent(new CustomEvent('waveforge:lyrics-side-align', { detail: next }))
   }
 
+  // 摩登模式"音量条显示"（独立 key waveforge_modeng_volume_bar_visible，仅 modeng 显示该项）。
+  // 摩登播放条没有工具栏，这条本来只藏在音量条右上角那枚小钮里；挪进面板后两处共用同一个 key，
+  // 由 `waveforge:modeng-volume-bar` 事件让播放面即时响应。
+  // 存储沿用 ModengPlayerPage 的既有编码（显式 '0' 才隐藏，其余一律视为显示）。
+  const [modengVolumeBar, setModengVolumeBar] = useState<boolean>(() => {
+    try { return localStorage.getItem('waveforge_modeng_volume_bar_visible') !== '0' } catch { return true }
+  })
+  const handleModengVolumeBarToggle = () => {
+    const next = !modengVolumeBar
+    setModengVolumeBar(next)
+    try { localStorage.setItem('waveforge_modeng_volume_bar_visible', next ? '1' : '0') } catch { /* noop */ }
+    window.dispatchEvent(new CustomEvent('waveforge:modeng-volume-bar', { detail: next }))
+  }
+
   // 音质快捷切换（播放条音质按钮）显示开关：默认开启，关掉后播放条不显示该按钮。
   // 独立 key + 事件同步（App 与 PlayerControls 分别监听）。
   const [qualityQuickSwitch, setQualityQuickSwitch] = useState<boolean>(() => {
@@ -553,23 +587,30 @@ export default memo(function QuickSettingsDialog({
   // 模糊滑块当前生效值/写回：MV 视频背景激活时操作 mvBackgroundBlur，封面背景时操作 backgroundBlur
   const activeBackgroundBlur = mvBackgroundActive ? mvBackgroundBlur : backgroundBlur
 
-  const handleBackgroundBlurChange = (value: number) => {
+  /**
+   * 模糊度的写入管道：MV 视频背景与封面背景是两套值，同名滑块按当前背景层分流。
+   * `persist` 区分「拖动中只广播」（预览要立刻跟手）与「松手 / 重置时落盘」。
+   *
+   * ⚠️ 落盘值只能从**参数**取：早先的 onCommit 是「回调里读 state」，而重置按钮
+   *    （handleBackgroundBlurChange(30) 紧跟 handleBackgroundBlurCommit()）在同一帧里
+   *    setState 还没生效，写回去的是旧值 —— 「默认」按钮因此一直静默失效。
+   */
+  const applyBackgroundBlur = (value: number, persist: boolean) => {
     if (mvBackgroundActive) {
       setMvBackgroundBlur(value)
       window.dispatchEvent(new CustomEvent('mvBackgroundBlurChanged', { detail: value }))
+      if (persist) localStorage.setItem('mvBackgroundBlur', value.toString())
     } else {
       setBackgroundBlur(value)
       window.dispatchEvent(new CustomEvent('backgroundBlurChanged', { detail: value }))
+      if (persist) localStorage.setItem('backgroundBlur', value.toString())
     }
   }
 
-  const handleBackgroundBlurCommit = () => {
-    if (mvBackgroundActive) {
-      localStorage.setItem('mvBackgroundBlur', mvBackgroundBlur.toString())
-    } else {
-      localStorage.setItem('backgroundBlur', backgroundBlur.toString())
-    }
-  }
+  const handleBackgroundBlurChange = (value: number) => applyBackgroundBlur(value, false)
+  const handleBackgroundBlurCommit = () => applyBackgroundBlur(activeBackgroundBlur, true)
+  /** 「默认」：封面背景 30px；MV 视频背景 0（视频清晰显示，与 App 侧默认值一致）。 */
+  const resetBackgroundBlur = () => applyBackgroundBlur(mvBackgroundActive ? 0 : 30, true)
 
   const handleImmersiveBarToggle = () => {
     const newValue = !showImmersiveBar
@@ -977,6 +1018,71 @@ export default memo(function QuickSettingsDialog({
 
   const sectionIndex = Math.max(0, sectionTabs.findIndex(tab => tab.id === activeSection))
 
+  /* 注：2026-11 远程 `refactor(pv)!` 已删除 PV 歌词模式，本矩阵的注释随之把
+     「看歌 / Folia / PV」收敛为「看歌 / Folia」；矩阵逻辑本身不变。 */
+  /* ------------------------------------------------------------------ *
+   * 设置项 × 歌词模式的「适配矩阵」（2026-10-09）
+   *
+   * 用户要求：**当前歌词模式根本不生效的设置，面板里不显示**（隐藏，不置灰、不留空槽）。
+   * 判定依据一律是源码里**实际的消费方**，不是"理论上应该有"——逐条核对如下：
+   *
+   * | 设置 | 消费方 | 生效模式 |
+   * |---|---|---|
+   * | 背景效果 / 模糊程度 / 隐藏白条 | App 的 `PulsingCrossfadeBackground`（全局封面背景层） | 现代 · 沉浸式 |
+   * | 封面律动 | 同上（+ 默认版面的 `AlbumCoverPlayer` / `LyricsDisplay`） | 现代 · 沉浸式 |
+   * | 音质快捷切换 | `PlayerControls`（摩登模式没有标准播放条） | 除摩登外全部 |
+   * | 音量条显示 | `ModengPlayerPage`（`waveforge_modeng_volume_bar_visible`） | 摩登 |
+   * | 实时频谱条 | App 里硬编码 `lyricDisplayMode === 'modern'` 的 `ModernAudioVisualizer` | 现代 |
+   * | 歌词大小 / 逐字歌词 / 歌词风格样式 / 歌词高光 | `LyricsDisplay`（现代＝滚动、沉浸式＝单行，同一个组件） | 现代 · 沉浸式 |
+   * | 翻译位置 | `LyricsDisplay` 的右下角翻译 + `TranslationDisplay`（沉浸式强制 traditional） | 现代 |
+   * | 左右交替歌词（现代） | `LyricsDisplay` 的 ttm:agent 分栏 | 现代 |
+   * | 左右交替歌词（摩登） | `ModengPlayerPage` | 摩登 |
+   * | 隐藏歌名艺人 | App 沉浸式分支 | 沉浸式 |
+   * | 歌词偏移 / 歌词翻译 / 罗马音 / 歌词模式切换 | 所有歌词模式都传了对应 prop | 全部 |
+   *
+   * **为什么背景类只留给「现代 / 沉浸式」**：另外几个模式都自铺一整块**不透明**背景，
+   * 把全局封面背景层整个盖住 —— 摩登 `#202022`、多维 `#05060c`、墙纸纸面（纸面 + 渐变）、
+   * 辉煌 `palette.surface`、Folia / PV 自己的 canvas；看歌（video）则由 MV 接管背景
+   * （`PulsingCrossfadeBackground` 在 `lyricDisplayMode === 'video'` 时根本不挂）。
+   * 在那几个模式里拖「模糊程度」，**面板预览会动、真机不动**，正是用户反馈的
+   * "无功能的进度条"。所以宁可不给，也不要给一个骗人的旋钮。
+   *
+   * 新增歌词模式时：在上面这张表里补一行，并在下面加一个 `supportsXxx` 常量，
+   * JSX 里用 `{supportsXxx && renderXxx(...)}` 显式门控 —— **不要**默认显示。
+   * ------------------------------------------------------------------ */
+  const supportsBackgroundLayer = lyricDisplayMode === 'modern' || lyricDisplayMode === 'immersive'
+  const supportsCoverPulse = supportsBackgroundLayer
+  const supportsLyricDetail = lyricDisplayMode === 'modern' || lyricDisplayMode === 'immersive'
+  const supportsVisualizer = lyricDisplayMode === 'modern'
+  const supportsTranslationPosition = lyricDisplayMode === 'modern'
+  const supportsQualityQuickSwitch = lyricDisplayMode !== 'modeng'
+
+  /* 段内可见槽数 —— 栅格列数要跟着它走（见下方 `slotGridClass`）。
+     过滤会把整槽拿掉，若列数还固定 3 列，像摩登这样的模式外观段只剩 1 张卡，
+     整行右侧 2/3 就是一片空白（用户 2026-10-09 截图反馈的"有点空"）。 */
+  const appearanceSlotCount = supportsBackgroundLayer ? 3 : 1
+  const featureSlotCount =
+    1 // 01 画面显示恒有（歌词偏移对所有模式都生效）
+    + (!isPureMusic || supportsLyricDetail ? 1 : 0) // 02 歌词呈现
+    + (!isPureMusic && supportsLyricDetail ? 1 : 0) // 03 歌词细节
+    + (!isPureMusic ? 1 : 0) // 04 翻译与注音
+  const activeSlotCount = activeSection === 'appearance'
+    ? appearanceSlotCount
+    : activeSection === 'features'
+      ? featureSlotCount
+      : 2 // 播放段固定两槽
+
+  /**
+   * 槽位栅格列数 = **段内可见槽数**（窄窗恒 1 列）。
+   * 「有几张卡就铺几列，宽度均分」——而不是写死 3 列让卡片挤在左边、右边空一大片。
+   * 列数只由「当前分段 + 当前歌词模式」决定，拖动 / 切背景效果都不会让列数抖动。
+   */
+  const slotGridClass = activeSlotCount >= 3
+    ? 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'
+    : activeSlotCount === 2
+      ? 'grid-cols-1 md:grid-cols-2'
+      : 'grid-cols-1'
+
   /** 当前模式若不在这六项里（看歌 / Folia），补一枚同名的选中 chip，避免「一个都没选中」。 */
   const lyricModeOptions = [
     ...QUICK_LYRIC_MODES.map(mode => ({ value: mode as string, label: LYRIC_MODE_LABELS[mode] })),
@@ -1232,10 +1338,15 @@ export default memo(function QuickSettingsDialog({
           </div>
 
           <div className={`qs-scroll min-h-0 flex-1 overflow-y-auto ${isDaylight ? 'qs-scroll-light' : ''}`}>
-            <div className="grid grid-cols-1 gap-3 sm:gap-3.5 md:grid-cols-2 xl:grid-cols-3">
-            {/* 机架槽：栅格自适应列数（窄窗 1 列 / 中 2 列 / 宽 3 列），同段各槽顶端对齐。
-                槽数随分段变（外观 3 / 功能 4 / 播放 2），卡片高度由内容撑开 —— 不再有固定高度窗口，
-                高窗口也不会留大片空白。 */}
+            <div
+              data-wf-qs-slots={activeSlotCount}
+              className={`grid gap-3 sm:gap-3.5 ${slotGridClass}`}
+            >
+            {/* 机架槽：栅格列数 = **本段可见槽数**（窄窗恒 1 列），同段各槽顶端对齐。
+                槽数随分段与歌词模式变（外观 3/1、功能 4~1、播放 2），卡片高度由内容撑开 ——
+                不再有固定高度窗口，高窗口也不会留大片空白。
+                ⚠️ 列数跟可见槽数走（`slotGridClass`），不是写死 3 列：过滤掉整槽后若仍留 3 列，
+                单卡段（如摩登的外观段）会把卡片挤在左侧 1/3、右侧空一片。 */}
             {activeSection === 'appearance' ? (
               <>
                 {renderSlot(
@@ -1254,68 +1365,82 @@ export default memo(function QuickSettingsDialog({
                       { columns: 2 },
                     )}
 
-                    {renderPresetGroup(
-                      '背景效果',
-                      backgroundEffectOptions,
-                      backgroundEffect,
-                      (value) => handleBackgroundEffectChange(value as BackgroundEffect),
-                      { columns: 4 },
-                    )}
+                    {supportsBackgroundLayer &&
+                      renderPresetGroup(
+                        '背景效果',
+                        backgroundEffectOptions,
+                        backgroundEffect,
+                        (value) => handleBackgroundEffectChange(value as BackgroundEffect),
+                        { columns: 4 },
+                      )}
 
-                    {renderToggleRow('音质快捷切换', qualityQuickSwitch, handleQualityQuickSwitchToggle, {
-                      description: '播放条显示当前音质，点击可快速切换',
-                      icon: Headphones,
-                    })}
+                    {supportsQualityQuickSwitch &&
+                      renderToggleRow('音质快捷切换', qualityQuickSwitch, handleQualityQuickSwitchToggle, {
+                        description: '播放条显示当前音质，点击可快速切换',
+                        icon: Headphones,
+                      })}
+
+                    {/* 摩登没有标准播放条，能放这儿的界面元素只有它自己的音量条。 */}
+                    {lyricDisplayMode === 'modeng' &&
+                      renderToggleRow('音量条显示', modengVolumeBar, handleModengVolumeBarToggle, {
+                        description: '摩登播放页右下角的音量条',
+                        icon: Headphones,
+                      })}
                   </>,
                   renderGhostChip('默认', () => {
                     handleThemeChange('dark')
-                    handleBackgroundEffectChange('blur')
-                    handleBackgroundBlurChange(30)
-                    handleBackgroundBlurCommit()
+                    // 背景类被当前模式隐藏时，重置**不要**连带改掉看不见的存储值 ——
+                    // 否则用户切回「现代」会发现背景被悄悄重置了。
+                    if (supportsBackgroundLayer) {
+                      handleBackgroundEffectChange('blur')
+                      resetBackgroundBlur()
+                    }
                   }),
                 )}
 
-                {/* 02 槽：只放**按背景效果出现**的调节项。
+                {/* 02 槽：只放**按背景效果出现**的调节项，且整个槽只在背景层生效的模式里渲染。
                     第九轮把外观段从 2 槽拆成 3 槽 —— 原来「界面与背景」一槽 4 个控件、
                     「律动与显示」一槽 3 个，两槽都要 210~289px，共同撑着下半块高度。
                     拆成 3 槽、每槽 ≤2 个必现控件后，外观段的需求上限降到约 190px。
-                    ⚠️ 「通透」「沉浸」之外没有可调项（模糊模式用的是写死的 40px），
-                    给一行说明文案兜底，否则那两种背景下这一槽就是个空盒子。 */}
-                {renderSlot(
-                  '02',
-                  '背景细节',
-                  Layers,
-                  <>
-                    {(backgroundEffect === 'transparent' || backgroundEffect === 'immersive') &&
-                      renderSliderRow(
-                        '模糊程度',
-                        activeBackgroundBlur,
-                        `${activeBackgroundBlur}px`,
-                        0,
-                        100,
-                        1,
-                        handleBackgroundBlurChange,
-                        handleBackgroundBlurCommit,
-                      )}
+                    「模糊程度」对通透 / 模糊 / 沉浸三档都生效（同一旋钮，只是叠加层不同），
+                    只有「摩登」档的流体背景不吃模糊，用一行说明文案兜底。 */}
+                {supportsBackgroundLayer &&
+                  renderSlot(
+                      '02',
+                      '背景细节',
+                      Layers,
+                      <>
+                        {backgroundEffect !== 'modern' &&
+                          renderSliderRow(
+                            '模糊程度',
+                            activeBackgroundBlur,
+                            `${activeBackgroundBlur}px`,
+                            0,
+                            100,
+                            1,
+                            handleBackgroundBlurChange,
+                            handleBackgroundBlurCommit,
+                          )}
 
-                    {backgroundEffect === 'immersive' &&
-                      renderToggleRow('隐藏白条', !showImmersiveBar, handleImmersiveBarToggle, {
-                        description: '沉浸模式下收起底部进度条',
-                        icon: Layers,
-                      })}
+                        {backgroundEffect === 'immersive' &&
+                          renderToggleRow('隐藏白条', !showImmersiveBar, handleImmersiveBarToggle, {
+                            description: '沉浸模式下收起底部进度条',
+                            icon: Layers,
+                          })}
 
-                    {backgroundEffect !== 'transparent' && backgroundEffect !== 'immersive' ? (
-                      <p
-                        className="pt-0.5 text-[11.5px] leading-relaxed"
-                        style={{ color: toRgba(secondary, 0.6) }}
-                      >
-                        当前背景效果使用固定参数，没有可调项。
-                      </p>
-                    ) : null}
-                  </>,
-                )}
+                        {backgroundEffect === 'modern' ? (
+                          <p
+                            className="pt-0.5 text-[11.5px] leading-relaxed"
+                            style={{ color: toRgba(secondary, 0.6) }}
+                          >
+                            摩登流体背景使用固定参数，没有可调项。
+                          </p>
+                        ) : null}
+                      </>,
+                  )}
 
-                {renderSlot(
+                {supportsCoverPulse &&
+                  renderSlot(
                   '03',
                   '封面律动',
                   Waves,
@@ -1351,14 +1476,16 @@ export default memo(function QuickSettingsDialog({
                   '画面显示',
                   AudioLines,
                   <>
-                    {renderToggleRow('实时频谱条', modernAudioVisualizerEnabled, handleModernAudioVisualizerToggle, {
-                      description: '在左下角显示当前音频的频谱',
-                      icon: AudioLines,
-                    })}
+                    {supportsVisualizer &&
+                      renderToggleRow('实时频谱条', modernAudioVisualizerEnabled, handleModernAudioVisualizerToggle, {
+                        description: '在左下角显示当前音频的频谱',
+                        icon: AudioLines,
+                      })}
 
                     {/* 「歌词偏移」原在 02 槽，但 02 槽的「歌词模式」是 6 项 3 列的键位网格、
                         本身就有两行高，再加两个滑杆就把那一槽顶到 needH 271（全场最高）。
-                        挪到这里后 02 槽只剩 2 个控件，槽位需求上限整体降到约 221。 */}
+                        挪到这里后 02 槽只剩 2 个控件，槽位需求上限整体降到约 221。
+                        它对所有歌词模式都生效（App 逐模式传 timeOffset）→ 不做模式门控。 */}
                     {renderSliderRow(
                       '歌词偏移',
                       lyricOffset,
@@ -1389,21 +1516,32 @@ export default memo(function QuickSettingsDialog({
                       })}
 
                     {/* 歌词大小从原 02 槽（歌词呈现）挪来：模式切换已由顶部下拉承担，
-                        播放设置不再重复；字号是所有模式通用的画面属性，归 01 画面显示。 */}
-                    {renderSliderRow(
-                      '歌词大小',
-                      lyricSize,
-                      lyricSize.toFixed(1),
-                      1.5,
-                      4.5,
-                      0.1,
-                      handleLyricSizeChange,
-                      handleLyricSizeCommit,
-                    )}
+                        播放设置不再重复；归 01 画面显示。
+                        ⚠️ 仍必须按模式门控（2026-11-01 合并保留）：唯一消费方是
+                        `LyricsDisplay`（现代滚动 / 沉浸式单行），摩登/多维/墙纸/辉煌
+                        各自算自己的字号 —— 在那里给这个滑块就是"面板会动、真机不动"。
+                        远程 2026-11 曾把门控去掉（注释称"所有模式通用"），但源码里
+                        `lyricSize` 并无其它消费者，故恢复 `supportsLyricDetail`。 */}
+                    {supportsLyricDetail &&
+                      renderSliderRow(
+                        '歌词大小',
+                        lyricSize,
+                        lyricSize.toFixed(1),
+                        1.5,
+                        4.5,
+                        0.1,
+                        handleLyricSizeChange,
+                        handleLyricSizeCommit,
+                      )}
                   </>,
                 )}
 
-                {renderSlot(
+                {/* 02 槽：只在「有歌词 + 当前模式吃这些设置」时渲染。
+                    「歌词大小」由 LyricsDisplay 读取 → 只有现代 / 沉浸式认它；
+                    纯音乐下「歌词模式」也收起（原有行为），此时若两件都不剩就整槽不渲染，
+                    避免出现一个空盒子。 */}
+                {(!isPureMusic || supportsLyricDetail) &&
+                  renderSlot(
                   '02',
                   '歌词呈现',
                   Settings2,
@@ -1446,8 +1584,8 @@ export default memo(function QuickSettingsDialog({
                 {/* 第三槽：歌词细节。从原「歌词呈现」里拆出来 —— 一个槽塞 8 个控件会把
                     下半块撑出滚动条（第八轮就是为这个拆的）。第九轮再把两个条件开关
                     （隐藏歌名艺人 / 左右交替歌词）挪去 01 槽，这里固定 3 个控件。
-                    纯音乐没有歌词，整槽不渲染。 */}
-                {!isPureMusic &&
+                    纯音乐没有歌词、且只有现代 / 沉浸式的 LyricsDisplay 读这些键 → 两者都不满足时整槽不渲染。 */}
+                {!isPureMusic && supportsLyricDetail &&
                   renderSlot(
                     '03',
                     '歌词细节',
@@ -1485,7 +1623,9 @@ export default memo(function QuickSettingsDialog({
                         icon: Languages,
                       })}
 
-                      {translationEnabled &&
+                      {/* 翻译位置只有现代的 LyricsDisplay（右下角翻译 + 独立 TranslationDisplay）
+                          认；沉浸式在 App 里被强制成 traditional，其余模式没有右下角翻译位。 */}
+                      {translationEnabled && supportsTranslationPosition &&
                         renderPresetGroup(
                           '翻译位置',
                           // 标签带上注册表里的 hint：同一个弹窗里「现代」既是歌词模式名，

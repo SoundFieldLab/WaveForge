@@ -280,6 +280,166 @@ describe('QuickSettings 弹窗', () => {
     expect(screen.queryByText('设置即时生效，改动会被记住')).toBeNull()
     expect(screen.queryByRole('button', { name: '完成' })).toBeNull()
   })
+
+  /**
+   * 设置项 × 歌词模式的适配矩阵（2026-10-09）。
+   *
+   * 多维 / 摩登 / 墙纸 / 辉煌 / Folia / PV 这几个模式都自铺一整块不透明背景，把全局封面
+   * 背景层盖住；歌词细节类的消费方也只有现代 / 沉浸式共用的那个 LyricsDisplay。
+   * 在这些模式里给这些旋钮 = 面板预览会动、真机不动的"无功能进度条"，所以一律不渲染。
+   */
+  it('hides background and lyric-detail controls for modes that never read them', () => {
+    localStorage.setItem('lyricDisplayMode', 'multidimensional')
+    renderSettings()
+    fireEvent.click(trigger())
+
+    fireEvent.click(screen.getByRole('button', { name: '外观' }))
+    expect(screen.getByText('界面主题')).toBeTruthy()
+    expect(screen.queryByText('背景效果')).toBeNull()
+    expect(screen.queryByText('背景细节')).toBeNull()
+    expect(screen.queryByText('模糊程度')).toBeNull()
+    expect(screen.queryByText('封面律动')).toBeNull()
+    // 音质快捷切换挂在标准播放条上，多维照样有 → 保留
+    expect(screen.getByText('音质快捷切换')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '功能' }))
+    // 频谱条在 App 里硬编码 lyricDisplayMode === 'modern'；歌词大小 / 歌词细节 / 翻译位置
+    // 的消费方都是 LyricsDisplay（现代滚动 + 沉浸式单行）
+    expect(screen.queryByText('实时频谱条')).toBeNull()
+    expect(screen.queryByText('歌词大小')).toBeNull()
+    expect(screen.queryByText('歌词细节')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '歌词翻译' }))
+    expect(screen.queryByText('翻译位置')).toBeNull()
+    // 所有歌词模式都传了 prop（或各自读取）的三项照常显示
+    expect(screen.getByText('歌词偏移')).toBeTruthy()
+    expect(screen.getByText('歌词模式')).toBeTruthy()
+    expect(screen.getByText('罗马音')).toBeTruthy()
+  })
+
+  it('drops the quality quick switch in modeng, which has no standard player bar', () => {
+    localStorage.setItem('lyricDisplayMode', 'modeng')
+    renderSettings()
+    fireEvent.click(trigger())
+
+    fireEvent.click(screen.getByRole('button', { name: '外观' }))
+    expect(screen.queryByText('音质快捷切换')).toBeNull()
+    expect(screen.queryByText('背景效果')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '功能' }))
+    // 摩登自己的「左右交替歌词」照常在；摩登不读频谱条 / 逐字 / 风格样式
+    expect(screen.getByText('左右交替歌词')).toBeTruthy()
+    expect(screen.queryByText('实时频谱条')).toBeNull()
+    expect(screen.queryByText('逐字歌词')).toBeNull()
+  })
+
+  /** 过滤会把整槽拿掉，栅格列数必须跟着可见槽数走，否则单卡段会把卡片挤在左边 1/3、右侧空一片。 */
+  it('sizes the slot grid to the visible slot count instead of a fixed three columns', () => {
+    const slots = () => dialog()?.querySelector('[data-wf-qs-slots]') as HTMLElement | null
+    renderSettings()
+    fireEvent.click(trigger())
+
+    // 现代模式：外观 3 槽 → 宽窗 3 列
+    expect(slots()?.getAttribute('data-wf-qs-slots')).toBe('3')
+    expect(slots()?.className).toContain('xl:grid-cols-3')
+
+    cleanup()
+    resetQuickSettingsForTest()
+    localStorage.setItem('lyricDisplayMode', 'modeng')
+    renderSettings()
+    fireEvent.click(trigger())
+    // 摩登模式：外观只剩 1 槽 → 收成 1 列铺满整行
+    expect(slots()?.getAttribute('data-wf-qs-slots')).toBe('1')
+    expect(slots()?.className).toContain('grid-cols-1')
+    expect(slots()?.className).not.toContain('xl:grid-cols-3')
+
+    // 播放段固定两槽 → 两列，不再留出第三列的空白
+    fireEvent.click(screen.getByRole('button', { name: '播放' }))
+    expect(slots()?.getAttribute('data-wf-qs-slots')).toBe('2')
+    expect(slots()?.className).toContain('md:grid-cols-2')
+    expect(slots()?.className).not.toContain('xl:grid-cols-3')
+  })
+
+  /** 摩登没有标准播放条，它自己的音量条是唯一能放进外观段的界面元素 —— 面板与音量条上的小钮共用同一个 key。 */
+  it('offers the modeng-only volume-bar switch and broadcasts the change', () => {
+    localStorage.setItem('lyricDisplayMode', 'modeng')
+    const onChanged = vi.fn()
+    window.addEventListener('waveforge:modeng-volume-bar', onChanged)
+    renderSettings()
+    fireEvent.click(trigger())
+    fireEvent.click(screen.getByRole('button', { name: '外观' }))
+
+    // 替身会让整棵弹窗子树重挂 → 取元素必须每次重新 getByRole
+    const volumeToggle = () => screen.getByRole('button', { name: '音量条显示' })
+    expect(volumeToggle().getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(volumeToggle())
+    expect(localStorage.getItem('waveforge_modeng_volume_bar_visible')).toBe('0')
+    expect(onChanged).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(volumeToggle())
+    expect(localStorage.getItem('waveforge_modeng_volume_bar_visible')).toBe('1')
+    expect(onChanged).toHaveBeenCalledTimes(2)
+    window.removeEventListener('waveforge:modeng-volume-bar', onChanged)
+  })
+
+  it('keeps the lyric-detail slot for immersive (same LyricsDisplay renderer, single-line)', () => {
+    localStorage.setItem('lyricDisplayMode', 'immersive')
+    renderSettings()
+    fireEvent.click(trigger())
+    fireEvent.click(screen.getByRole('button', { name: '功能' }))
+
+    expect(screen.getByText('逐字歌词')).toBeTruthy()
+    expect(screen.getByText('歌词风格样式')).toBeTruthy()
+    expect(screen.getByText('歌词高光')).toBeTruthy()
+    expect(screen.getByText('隐藏歌名艺人')).toBeTruthy()
+    // 频谱条只在现代；沉浸式的翻译位置被 App 强制成 traditional → 位置选择不出现
+    expect(screen.queryByText('实时频谱条')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '歌词翻译' }))
+    expect(screen.queryByText('翻译位置')).toBeNull()
+  })
+
+  it('makes the blur of the 模糊 background effect adjustable and persists it on commit', () => {
+    renderSettings()
+    fireEvent.click(trigger())
+    fireEvent.click(screen.getByRole('button', { name: '外观' }))
+
+    // 默认背景效果就是「模糊」：以前这一档写死 40px、只能显示一行"固定参数"，
+    // 现在与「通透 / 沉浸」共用同一个可调半径
+    expect(screen.getByText('背景效果')).toBeTruthy()
+    const blurSlider = () => screen.getByRole('slider', { name: '模糊程度' }) as HTMLInputElement
+    expect(blurSlider().value).toBe('30')
+
+    fireEvent.change(blurSlider(), { target: { value: '62' } })
+    expect(screen.getByText('62px')).toBeTruthy()
+    // 拖动中不落盘，松手/键盘操作结束才写（与其它滑块同款分工；jsdom 里用 keyUp 走同一条 onCommit）
+    expect(localStorage.getItem('backgroundBlur')).toBeNull()
+    fireEvent.keyUp(blurSlider(), { key: 'ArrowRight' })
+    expect(localStorage.getItem('backgroundBlur')).toBe('62')
+
+    // 沉浸式额外多一个「隐藏白条」
+    fireEvent.click(screen.getByRole('button', { name: '沉浸' }))
+    expect(screen.getByText('隐藏白条')).toBeTruthy()
+
+    // 摩登流体背景不吃模糊 → 不出现滑块，换成说明文案
+    fireEvent.click(screen.getByRole('button', { name: '摩登' }))
+    expect(screen.queryByRole('slider', { name: '模糊程度' })).toBeNull()
+    expect(screen.getByText('摩登流体背景使用固定参数，没有可调项。')).toBeTruthy()
+  })
+
+  it('resets the visible background settings but leaves the hidden ones alone', () => {
+    // 多维模式看不到背景类设置，「默认」就不该悄悄把背景效果 / 模糊度重置掉
+    localStorage.setItem('lyricDisplayMode', 'multidimensional')
+    localStorage.setItem('backgroundEffect', 'immersive')
+    localStorage.setItem('backgroundBlur', '77')
+    renderSettings()
+    fireEvent.click(trigger())
+    fireEvent.click(screen.getByRole('button', { name: '外观' }))
+
+    fireEvent.click(screen.getByRole('button', { name: '默认' }))
+    expect(localStorage.getItem('playerTheme')).toBe('dark')
+    expect(localStorage.getItem('backgroundEffect')).toBe('immersive')
+    expect(localStorage.getItem('backgroundBlur')).toBe('77')
+  })
 })
 
 /**

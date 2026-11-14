@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>WE 场景渲染验证页</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #stage { position: relative; width: 100vw; height: 100vh; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #hud {
+      position: fixed; left: 8px; top: 8px; z-index: 10;
+      font: 12px/1.6 Consolas, monospace; color: #8f8; background: rgba(0,0,0,.55);
+      padding: 6px 10px; border-radius: 6px; white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage"><canvas id="c"></canvas></div>
+  <div id="hud">加载中…</div>
+  <script type="module" src="./debug-minimal/we-scene-probe.ts"></script>
+</body>
+</html>

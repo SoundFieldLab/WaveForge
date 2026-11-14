@@ -4457,9 +4457,23 @@ function findWallpaperEngineUserConfig(config) {
 // config.json 的读取+解析按 mtime 缓存：WE 的 config.json 可达数十 KB（含全部已装壁纸索引），
 // watcher 每 10s tick 重读+JSON.parse 纯属浪费；mtime 未变化时复用上次解析结果。
 let weConfigCache = { path: null, mtimeMs: -1, config: null }
+// 瞬时失败标记：WE 重写 config.json 的瞬间 stat/read/parse 可能抛错。此时必须让 watcher
+// 跳过本 tick（保持上次签名），否则签名会在 engine↔no-engine 间翻转 → 假 wallpaper-changed
+// → 渲染端拆掉实时画布回退静态图、下一 tick 又装回来 → 带过场动画的壁纸反复重播。
+let weConfigTransientFailure = false
 
 async function readWallpaperEngineConfigCached(configPath) {
-  const stats = await fs.promises.stat(configPath)
+  // 注意：只置位不重置——同一 tick 内本函数会被 getWallpaperEngineSource 与
+  // getWallpaperEngineMonitorFiles 各调一次，任一失败都应让整个 tick 跳过；
+  // 重置由 watcher 在每个 tick 开头统一做。
+  let stats
+  try {
+    stats = await fs.promises.stat(configPath)
+  } catch {
+    // 原子重写窗口内文件可能短暂消失，与解析失败同口径处理
+    weConfigTransientFailure = true
+    return null
+  }
   if (weConfigCache.path === configPath && weConfigCache.mtimeMs === stats.mtimeMs && weConfigCache.config) {
     return weConfigCache.config
   }
@@ -4469,6 +4483,7 @@ async function readWallpaperEngineConfigCached(configPath) {
   try {
     config = JSON.parse(await fs.promises.readFile(configPath, 'utf8'))
   } catch {
+    weConfigTransientFailure = true
     return null
   }
   weConfigCache = { path: configPath, mtimeMs: stats.mtimeMs, config }
@@ -4493,49 +4508,74 @@ async function getWallpaperEngineSource() {
     const stats = fs.statSync(wallpaperPath)
     const sourceType = getWallpaperEngineSourceType(wallpaperPath)
 
-    // 对于 Scene 类型壁纸，标记为不支持
+    // Scene 类型：v1 WebGL2 实时渲染已支持（wallpaperEngineScene/renderer）。
+    // 返回工程目录（渲染端 scene/manifest?id=<绝对路径>）+ preview 媒体 URL 供失败回退。
+    // ⚠️ 历史上这里标 unsupported:true（当时无渲染能力）→ 前端联动直接回退 Windows 壁纸，
+    // 导致「Wallpaper Engine 联动」对 scene 壁纸永远不生效（2026-10-20 修复）。
     if (sourceType === 'scene') {
-      logWallpaper('[WallpaperEngine] Scene wallpaper detected - unsupported, falling back to Windows wallpaper')
+      const wallpaperDir = path.dirname(wallpaperPath)
+      let title = path.basename(wallpaperDir)
+      let previewUrl
+      try {
+        // ⚠️ Monitor0.file 可能直接是 scene.pkg（数百 MB 二进制）——绝不能对它 readFileSync utf8。
+        // pkg 型工程从目录内的 project.json 读元数据；.json 型工程读自身。
+        const projectJsonPath = /\.json$/i.test(wallpaperPath)
+          ? wallpaperPath
+          : path.join(wallpaperDir, 'project.json')
+        if (fs.existsSync(projectJsonPath)) {
+          const projectJson = JSON.parse(fs.readFileSync(projectJsonPath, 'utf8'))
+          if (projectJson && typeof projectJson.title === 'string' && projectJson.title) title = projectJson.title
+          if (projectJson && typeof projectJson.preview === 'string' && projectJson.preview) {
+            const previewPath = path.join(wallpaperDir, projectJson.preview)
+            if (fs.existsSync(previewPath)) {
+              // 走 3001 HTTP 代理而非 waveforge-media 协议：渲染端页面是 http:// 源，
+              // <img>/<video> 加载自定义协议存在不确定性，且白名单是主进程内存态（LRU 可被挤掉）。
+              // 3001 media 端点的 abs 模式有「位于 WE 根内 + 扩展名白名单」防护。
+              previewUrl = `http://127.0.0.1:3001/api/wallpaper-engine/media?abs=${encodeURIComponent(previewPath)}`
+            }
+          }
+        }
+      } catch { /* project.json 解析失败则无 preview 回退 */ }
       return {
-        unsupported: true,
         sourceType: 'scene',
-        path: wallpaperPath
+        path: wallpaperDir,
+        fileUrl: pathToFileURL(wallpaperPath).href,
+        title,
+        previewUrl,
+        monitor,
+        local: Boolean(wallpaper.local),
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+        configPath,
       }
     }
     
-    // 对于 Web 类型壁纸，尝试提取视频文件
+    // Web 类型壁纸：优先目录内现成视频（有则按 video 联动，最省资源）；
+    // 没有则按 web 源下发（渲染端 iframe 走 3001 的 /api/wallpaper-engine/web 静态路由真渲染）。
+    // 历史上这里「找不到视频就标 unsupported」→ 网页壁纸永远回退系统壁纸（2026-10-23 修复）。
     if (sourceType === 'web') {
       const wallpaperDir = path.dirname(wallpaperPath)
-      logWallpaper('[WallpaperEngine] Web wallpaper detected, searching for video files in:', wallpaperDir)
-      
-      // 搜索目录中的视频文件
-      const videoExtensions = ['.mp4', '.webm', '.mov', '.m4v']
-      let foundVideo = null
-      
+      logWallpaper('[WallpaperEngine] Web wallpaper detected:', wallpaperDir)
+
       try {
         const files = fs.readdirSync(wallpaperDir)
-        for (const file of files) {
-          const ext = path.extname(file).toLowerCase()
-          if (videoExtensions.includes(ext)) {
-            foundVideo = path.join(wallpaperDir, file)
-            logWallpaper('[WallpaperEngine] Found video file:', foundVideo)
-            break
-          }
-        }
-        
-        // 如果找到视频文件，返回视频源
-        if (foundVideo && fs.existsSync(foundVideo)) {
+        const videoExtensions = ['.mp4', '.webm', '.mov', '.m4v']
+        const foundVideo = files
+          .filter(file => videoExtensions.includes(path.extname(file).toLowerCase()))
+          .map(file => path.join(wallpaperDir, file))
+          .find(candidate => { try { return fs.statSync(candidate).isFile() } catch { return false } })
+
+        if (foundVideo) {
           const videoStats = fs.statSync(foundVideo)
           logWallpaper('[WallpaperEngine] Using extracted video from web wallpaper:', foundVideo)
-          
           return {
             path: foundVideo,
             fileUrl: pathToFileURL(foundVideo).href,
             mediaUrl: toMediaUrl(foundVideo),
-            sourceType: 'video', // 改为 video 类型
+            sourceType: 'video',
             monitor,
             local: Boolean(wallpaper.local),
-            title: path.basename(wallpaperDir), // 使用目录名作为标题
+            title: path.basename(wallpaperDir),
             size: videoStats.size,
             mtimeMs: videoStats.mtimeMs,
             configPath,
@@ -4544,13 +4584,34 @@ async function getWallpaperEngineSource() {
       } catch (err) {
         console.warn('[WallpaperEngine] Failed to search for video files:', err.message)
       }
-      
-      // 如果没有找到视频，标记为不支持
-      logWallpaper('[WallpaperEngine] Web wallpaper has no extractable video, falling back to Windows wallpaper')
+
+      // 入口 html：WE config 里的 file 即入口（project.json 的 file 字段同源），保险再取 basename
+      const entry = path.basename(wallpaperPath) || 'index.html'
+      let title = path.basename(wallpaperDir)
+      let previewUrl
+      try {
+        const projectJson = JSON.parse(fs.readFileSync(path.join(wallpaperDir, 'project.json'), 'utf8'))
+        if (projectJson && typeof projectJson.title === 'string' && projectJson.title) title = projectJson.title
+        if (projectJson && typeof projectJson.preview === 'string' && projectJson.preview) {
+          const previewPath = path.join(wallpaperDir, projectJson.preview)
+          if (fs.existsSync(previewPath)) {
+            previewUrl = `http://127.0.0.1:3001/api/wallpaper-engine/media?abs=${encodeURIComponent(previewPath)}`
+          }
+        }
+      } catch { /* project.json 缺失/解析失败则用目录名 + 无 preview */ }
+
+      logWallpaper('[WallpaperEngine] Web wallpaper live source, entry:', entry)
       return {
-        unsupported: true,
         sourceType: 'web',
-        path: wallpaperPath
+        path: wallpaperDir,
+        entry,
+        previewUrl,
+        monitor,
+        local: Boolean(wallpaper.local),
+        title,
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+        configPath,
       }
     }
     
@@ -4584,17 +4645,47 @@ async function getWallpaperEngineSource() {
 
 let windowsWallpaperRequest = null
 
+/**
+ * WE 多屏选中签名：遍历 selectedwallpapers 全部 monitor 的 file（含 mtime/size）。
+ * watcher 把它并入签名——副屏换壁纸（WE 只改对应 monitor 的 file）也能触发推送；
+ * 主推给渲染端的仍是 Monitor0 的壁纸。
+ */
+async function getWallpaperEngineMonitorFiles() {
+  try {
+    const configPath = await getWallpaperEngineConfigPath()
+    if (!configPath) return []
+    const config = await readWallpaperEngineConfigCached(configPath)
+    const selected = findWallpaperEngineUserConfig(config)?.general?.wallpaperconfig?.selectedwallpapers
+    if (!selected || typeof selected !== 'object') return []
+    const monitors = []
+    for (const [monitorName, wallpaper] of Object.entries(selected)) {
+      const file = wallpaper?.file
+      if (!file) continue
+      let mtimeMs = 0
+      let size = 0
+      try {
+        const stats = fs.statSync(file)
+        mtimeMs = stats.mtimeMs
+        size = stats.size
+      } catch { /* 文件失效也保留条目（换壁纸时旧文件可能被删） */ }
+      monitors.push({ monitor: monitorName, file, mtimeMs, size })
+    }
+    return monitors
+  } catch {
+    return []
+  }
+}
+
 function getWindowsWallpaper() {
   if (windowsWallpaperRequest) return windowsWallpaperRequest
 
-  logWallpaper('🔍 [Wallpaper] 开始获取壁纸路径..')
+  // 稳态轮询全程静音（watcher 每 10s 一次，逐行打日志会刷屏）；只在实际变化/错误时输出
   windowsWallpaperRequest = new Promise((resolve, reject) => {
     if (os.platform() !== 'win32') {
       console.error('❌ [Wallpaper] 不支持的操作系统:', os.platform())
       reject(new Error('此功能仅支持 Windows 系统'))
       return
     }
-    logWallpaper('✅ [Wallpaper] 系统检查通过: Windows')
 
     execFile(
       'reg.exe',
@@ -4612,13 +4703,15 @@ function getWindowsWallpaper() {
           const output = stdout?.length ? new TextDecoder('gbk').decode(stdout) : ''
           const match = output.match(/^\s*Wallpaper\s+REG_\w+\s+(.+?)\s*$/mi)
           const wallpaperPath = match?.[1]?.trim() || ''
-          logWallpaper('📁 [Wallpaper] 壁纸路径:', wallpaperPath)
 
           if (wallpaperPath && fs.existsSync(wallpaperPath)) {
-            logWallpaper('✓ [Wallpaper] 文件存在验证通过')
             const wallpaper = await buildWallpaperPayload(wallpaperPath)
             const wallpaperEngine = await getWallpaperEngineSource()
             if (wallpaperEngine) wallpaper.wallpaperEngine = wallpaperEngine
+            // WE 多屏选中表：副屏换壁纸也要能触发 watcher 推送（渲染端只渲染 Monitor0）
+            try {
+              wallpaper.wallpaperEngineMonitors = await getWallpaperEngineMonitorFiles()
+            } catch { /* 多屏签名失败不影响主壁纸 */ }
             // 多屏壁纸：Windows 把每块屏的独立壁纸转码为 Themes 目录的 TranscodedWallpaper 系列文件，
             // 一并采集进 payload 供 watcher 判断「任一屏幕壁纸变化」。
             try {
@@ -4638,14 +4731,6 @@ function getWindowsWallpaper() {
             } catch (scanError) {
               logWallpaper('⚠️ [Wallpaper] 扫描多屏壁纸失败:', scanError?.message || scanError)
             }
-            logWallpaper('🔗 [Wallpaper] 转换后的URL:', wallpaper.fileUrl)
-            logWallpaper('📊 [Wallpaper] 壁纸数据:', {
-              mimeType: wallpaper.mimeType,
-              size: wallpaper.size,
-              mtimeMs: wallpaper.mtimeMs,
-              wallpapers: wallpaper.wallpapers?.length,
-            })
-            logWallpaper('✓ [Wallpaper] 壁纸获取成功')
             resolve(wallpaper)
           } else {
             console.error('❌ [Wallpaper] 文件不存在:', wallpaperPath)
@@ -4837,7 +4922,6 @@ function startWallpaperWatcher() {
   }
 
   wallpaperWatcher = setInterval(async () => {
-    logWallpaper('🔧 [Watcher] 检查壁纸变化..')
     // 重入保护：上一次 tick 尚未结束（如 powershell 查询最坏 5s 超时）则跳过本次，
     // 避免 10s interval 与仍在执行的检查重叠。
     if (wallpaperWatcherBusy) {
@@ -4846,12 +4930,24 @@ function startWallpaperWatcher() {
     }
     wallpaperWatcherBusy = true
     try {
+      weConfigTransientFailure = false
       const wallpaper = await getWindowsWallpaper()
+      // config.json 瞬时失败（WE 正在重写）：engine 数据不可信，跳过本 tick 保持上次签名，
+      // 防止签名在 engine↔no-engine 间翻转发出假壁纸变化事件（详见 weConfigTransientFailure 注释）
+      if (weConfigTransientFailure) {
+        logWallpaper('⏭️ [Watcher] config.json 瞬时读取失败，跳过本 tick 防假变化')
+        return
+      }
+      const engineMonitorSignature = Array.isArray(wallpaper.wallpaperEngineMonitors) && wallpaper.wallpaperEngineMonitors.length > 0
+        ? wallpaper.wallpaperEngineMonitors.map(m => `${m.monitor}:${m.file}:${m.mtimeMs}:${m.size}`).join(';')
+        : ''
       const engineSignature = wallpaper.wallpaperEngine
-        ? `${wallpaper.wallpaperEngine.path}:${wallpaper.wallpaperEngine.mtimeMs}:${wallpaper.wallpaperEngine.size}:${wallpaper.wallpaperEngine.sourceType}`
+        ? `${wallpaper.wallpaperEngine.path}:${wallpaper.wallpaperEngine.mtimeMs}:${wallpaper.wallpaperEngine.size}:${wallpaper.wallpaperEngine.sourceType}|${engineMonitorSignature}`
         : 'no-engine'
       const isLiveEngineWallpaper = wallpaper.wallpaperEngine &&
-        (wallpaper.wallpaperEngine.sourceType === 'video' || wallpaper.wallpaperEngine.sourceType === 'web')
+        (wallpaper.wallpaperEngine.sourceType === 'video' ||
+         wallpaper.wallpaperEngine.sourceType === 'web' ||
+         wallpaper.wallpaperEngine.sourceType === 'scene')
       const currentSignature = isLiveEngineWallpaper
         ? engineSignature
         : `${wallpaper.path}:${wallpaper.mtimeMs}:${wallpaper.size}:${engineSignature}`
@@ -4873,7 +4969,7 @@ function startWallpaperWatcher() {
           console.warn('⚠️ [Watcher] 主窗口不存在或已销毁')
         }
       } else {
-        logWallpaper('✅ [Watcher] 壁纸未变化')
+        // 稳态静音：每 10s 一次的「未变化」不打日志，控制台只保留真实变化/错误
       }
     } catch (error) {
       console.error('❌ [Watcher] 壁纸监听出错:', error.message)

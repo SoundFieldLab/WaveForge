@@ -256,6 +256,7 @@ import PlatformLoginNotice from './components/PlatformLoginNotice'
 import SimilarSongsPanel, { extractSimilarSongItems, normalizeSimilarSongItems } from './components/SimilarSongsPanel'
 import PluginOverlay from './components/PluginOverlay'
 import { setGlobalAudioAnalyzerStore, setGlobalPlaybackActive, setGlobalAudioAnalysers, dglabClient } from './plugins/clients/DGLabClient'
+import { registerWeAudioSource, unregisterWeAudioSource } from './services/wallpaperEngineScene/spectrumBus'
 import { setChromaAudioAnalyzerStore, setChromaPlaybackActive } from './plugins/clients/ChromaClient'
 import { setSignalRgbAudioAnalyzerStore, setSignalRgbPlaybackActive } from './plugins/clients/SignalRgbClient'
 import {
@@ -725,10 +726,10 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
   const staticFilter = backgroundEffect === 'transparent'
     ? `blur(${backgroundBlur}px) brightness(1.1)`
     : backgroundEffect === 'blur'
-      ? 'blur(40px)'
+      ? `blur(${backgroundBlur}px)`
       : `blur(${backgroundBlur}px) saturate(1.3)`
   // 背景源图分辨率跟随实际模糊半径：模糊 0 时 128 源图铺满全屏会糊成像素块
-  const backgroundArtworkSize = getBackgroundArtworkSize(backgroundEffect === 'blur' ? 40 : backgroundBlur)
+  const backgroundArtworkSize = getBackgroundArtworkSize(backgroundBlur)
   const crossfadeImageStyle = useMemo(() => ({
     filter: staticFilter,
     transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0) * ${PULSE_SCALE_GAIN}))`,
@@ -741,30 +742,35 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
   // 智能比例：封面是正方形、屏幕是长方形（超宽屏更极端）。
   // 单纯 cover 会把方图放大裁成一条（超宽屏相当于把封面放大数倍），于是低模糊时改为
   // 「整图 contain（不裁不放大）+ 同图糊化铺底补两侧」，既不切封面也不留空。
-  const backgroundBlurValue = backgroundEffect === 'blur' ? 40 : backgroundBlur
+  //
+  // ⚠️ 「通透 / 模糊 / 沉浸」共用同一个模糊半径 `backgroundBlur`（快捷设置里的
+  //    「模糊程度」滑块，0~100px）。三者只是**同一旋钮配不同叠加层**：
+  //    通透 = 提亮、模糊 = 原样、沉浸 = 加饱和 + 额外暗角。
+  //    2026-10-09 之前「模糊」档写死 40px，用户反馈"模糊度的进度条调不了"——
+  //    现改为与另外两档同源；`blur` 档**不再**有 `? 40 :` 的特例，别再回头加回来。
   // 极端宽高比阈值：16:9=1.78 / 16:10=1.6 走铺满；21:9=2.33 / 32:9 才兜底
   const EXTREME_ASPECT = 2.05
   const fitWholeCover = backgroundEffect !== 'transparent'
-    && backgroundBlurValue < 16
+    && backgroundBlur < 16
     && viewportAspect >= EXTREME_ASPECT
     && !isModernBackground
   const fillImageStyle = useMemo(() => ({
     backgroundSize: 'cover',
     backgroundPosition: 'center',
     // 补底层始终重糊：既遮住裁切痕迹，也不与上层整图争细节
-    filter: `blur(${Math.max(30, backgroundBlurValue * 1.6)}px) saturate(1.25) brightness(0.6)`,
+    filter: `blur(${Math.max(30, backgroundBlur * 1.6)}px) saturate(1.25) brightness(0.6)`,
     transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0)))`,
     transition: 'transform 0.055s linear, opacity 0.5s',
     willChange: 'transform' as const,
-  }), [backgroundBlurValue, baseScale])
+  }), [backgroundBlur, baseScale])
   const fitImageStyle = useMemo(() => ({
     // 90% 视口高：整张封面完整可见，四周留一点呼吸位由糊化层补满（不留空、不裁切、不放大）
     backgroundSize: 'auto 90%',
     backgroundRepeat: 'no-repeat',
     backgroundPosition: 'center',
-    filter: backgroundBlurValue > 0 ? `blur(${backgroundBlurValue}px) saturate(1.15)` : 'none',
+    filter: backgroundBlur > 0 ? `blur(${backgroundBlur}px) saturate(1.15)` : 'none',
     transition: 'transform 0.055s linear, opacity 0.5s',
-  }), [backgroundBlurValue])
+  }), [backgroundBlur])
 
   return (
     <div
@@ -1776,7 +1782,8 @@ function App() {
     return saved === 'transparent' || saved === 'immersive' || saved === 'modern' ? saved : 'blur'
   })
   
-  // 背景模糊度（仅用于透明模式）
+  // 背景模糊度（px）。「通透 / 模糊 / 沉浸」三档共用这一个半径，
+  // 由快捷设置 → 外观 → 背景细节 的「模糊程度」滑块调节（默认 30px）。
   const [backgroundBlur, setBackgroundBlur] = useState(() => {
     const saved = parseFloat(localStorage.getItem('backgroundBlur') || '')
     return Number.isFinite(saved) ? saved : 30 // 默认值 30px（脏值/NaN 兜底）
@@ -8272,6 +8279,21 @@ function App() {
   const desktopSpectrumLastPushSpectrumRef = useRef<number[]>(Array(5).fill(0))
   const desktopSpectrumLastPushAtRef = useRef(0)
 
+  // WE 场景壁纸音频响应：注册频谱源。spectrumBus 在有场景订阅时自驱动 rAF 采样
+  // （本地 analyser 首播才创建；外部播放走 WebView2 WASAPI loopback 频谱，64 对数 bin）
+  useEffect(() => {
+    registerWeAudioSource({
+      getAnalyser: () => desktopAnalyserRef.current,
+      getExternalSpectrum: () => (audioPlayer.isExternalPlaybackActive?.() ? externalSpectrumRef.current : null),
+      isActive: () => {
+        if (audioPlayer.isExternalPlaybackActive?.()) return getBridgeState().playing
+        const audio = audioPlayer.getAudioElement()
+        return Boolean(isPlayingRef.current && audio && !audio.paused)
+      },
+    })
+    return () => unregisterWeAudioSource()
+  }, [])
+
   useEffect(() => {
     const bridge = window.electron?.desktopPlayer
     if (!bridge) return
@@ -12430,6 +12452,9 @@ function App() {
                     onOpenComments={getPlatformCapabilities(currentSong.platform || 'netease').comments
                       ? () => handleViewComments(currentSong)
                       : undefined}
+                    // 右下角「播放列表」按钮：打开 App 层的 PlaylistPanel（当前播放队列），
+                    // 与简约模式 LivePlayerControls 的 onPlaylistClick 走同一个开关。
+                    onOpenPlaylist={() => setShowPlaylist(true)}
                     onHomeClick={handlePlayerHome}
                     onMvBackgroundToggle={handleMvBackgroundToggle}
                     mvBackgroundEnabled={mvBackgroundEnabled}

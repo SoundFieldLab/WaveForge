@@ -40,6 +40,8 @@ Python beat service runs on **port 3002** (not 5001 — historical docs are stal
 Before creating or using a standalone debug webpage, read [`DEBUG_PAGES.md`](./DEBUG_PAGES.md). It registers developer-only visual tools, their launch command, local URL, data/network constraints, and production-build status.
 
 - **Weather Lab**: run the existing `npm run dev`, then open `http://127.0.0.1:3000/weather-debug.html`. Use it to compare all Apple weather scenes and desktop `full`/`simple` cards with local mock data. Do not add `weather-debug.html` to production Vite inputs.
+- **Wallpaper Engine Scene Probe**: `PORT=3019 node local-server.mjs` + `node node_modules/vite/bin/vite.js --config vite.config.we-probe.mjs`，开 `http://127.0.0.1:3020/debug-we-scene.html?id=defaultprojects/beach&server=same`（`only=` 过滤单对象）。验证 WE scene 实时渲染器（`.tex` 解码/着色器转译/混合）。Electron 截图前须 `unset ELECTRON_RUN_AS_NODE`。详见 `DEBUG_PAGES.md`。
+- **WebWallGL Integration Probe**: 同一 3019/3020 实例，开 `http://127.0.0.1:3020/wwgl-probe.html?id=<id>&server=abs&port=3019`。验证应用主场景渲染链第一级 npm 包 `webwallgl`（`WallpaperEngineWwglCanvas`，源路由 `/api/wallpaper-engine/scene/wwgl/<id>/`）。详见 `DEBUG_PAGES.md`。
 
 
 **响度测量服务**：`python-beat-service/loudness_server.py`（独立于节拍服务，**端口 3003**，`/lufs` 端点返回 ITU-R BS.1770 积分响度）。响度归一化（调音室开关）按曲目调用它；该服务未运行/失败时归一化自动回退原声，不影响播放。启动入口：dev 模式 `dev-electron.mjs` 自动拉起；打包版 `main.cjs` startLocalBackend() 用嵌入式 Python spawn；手动 `launchers/start-full.bat` 同起。

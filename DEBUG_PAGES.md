@@ -107,6 +107,54 @@ HSE 3.5 ships developer-only Electron probes and worklet verification scripts (m
 - They must not run against the production user profile: probes create their own temporary Electron `userData` and do not open ports 3000 / 3001.
 - `--require-deadline` is a strict performance gate; initialization/switch overruns are recorded as known boundaries, never hidden by removing counts.
 - The snapshot's standalone `spatial-debug.html` / `src/spatial-debug/**` preview entry and `electron-ui-afg.cjs` were deliberately **not** migrated. If a HSE preview page is needed later, follow "Adding A New Debug Page" and register it here with its URL, command, scope, and production status.
+## Wallpaper Engine Scene Probe
+
+| Field | Value |
+|---|---|
+| Page | `debug-we-scene.html` |
+| Local URL | `http://127.0.0.1:3020/debug-we-scene.html?id=<壁纸id>&server=same` |
+| Start command | `node node_modules/vite/bin/vite.js --config vite.config.we-probe.mjs`（3020，`/api` 代理到场景服务 3019）+ `PORT=3019 node local-server.mjs` |
+| Source entry | `debug-minimal/we-scene-probe.ts` |
+| Renderer under test | `src/services/wallpaperEngineScene/renderer.ts` + `wallpaper-engine-scene.mjs` |
+| Screenshot tool | `.workbuddy/verification/we-scene/_shot.cjs`（Electron，参数走环境变量；需 `unset ELECTRON_RUN_AS_NODE`） |
+| Production status | Development-only. Do not add `debug-we-scene.html` to Vite `rollupOptions.input`. |
+
+### Purpose
+
+Validate the Wallpaper Engine scene (`.json` 场景图) live renderer: manifest parsing, `.tex` texture decoding (LZ4/DXT→RGBA, canvas cropping), HLSL→GLSL shader transpilation, blending modes, and orthographic composition.
+
+### URL Parameters
+
+- `id`: wallpaper relative id — workshop `<数字id>` or official `defaultprojects/<名>`.
+- `server`: `same` for vite proxy (recommended), or absolute base URL.
+- `only`: comma-separated object names to render a single scene object (per-object debugging).
+
+### Safety Rules
+
+- Do not call this from production code paths; it is a manual verification surface.
+- Electron screenshots require clearing `ELECTRON_RUN_AS_NODE` (WorkBuddy shells export it, which makes electron.exe run as plain Node).
+- Verification artifacts (screenshots, shader dumps, `_shot.cjs`, `_dump-tex.mjs`) live in `.workbuddy/verification/we-scene/`.
+
+## WebWallGL Integration Probe
+
+| Field | Value |
+|---|---|
+| Page | `wwgl-probe.html` |
+| Local URL | `http://127.0.0.1:3020/wwgl-probe.html?id=<壁纸id>&server=abs&port=3019` |
+| Start command | `node node_modules/vite/bin/vite.js --config vite.config.we-probe.mjs`（3020）+ `PORT=3019 node local-server.mjs`（wwgl 静态路由所在实例；`server=same` 会打到 3001 应用后端，新路由须 3019 独立实例） |
+| Renderer under test | npm 包 `webwallgl`（MIT，github.com/oneincase/webwallgl）——应用主场景渲染器（`src/components/WallpaperEngineWwglCanvas.tsx`） |
+| Backend route | `local-server.mjs` → `/api/wallpaper-engine/scene/wwgl/<id>/<file>`（workshop 目录静态透出，安全校验同 web 路由） |
+| Screenshot tool | `.workbuddy/verification/we-scene/_shot.cjs`（认 `__weProbeReady` 标记） |
+| Production status | Development-only. Do not add `wwgl-probe.html` to Vite `rollupOptions.input`. |
+
+### Purpose
+
+Validate the WebWallGL integration (scene.pkg → WebGL2 实时渲染) 与应用主渲染链 `WWGL → legacy renderer → 静态 preview` 的第一级。URL 参数：`id`（workshop id）、`server`（`same`=vite 代理 / `abs`=直连）、`port`（abs 模式端口，默认 3019）、`w`/`h`、`props`（JSON 用户属性覆盖）。
+
+### Safety Rules
+
+- 与 `debug-we-scene.html` 共用 3019/3020 实例与截图纪律（`unset ELECTRON_RUN_AS_NODE`；产物放 `.workbuddy/verification/we-scene/`）。
+- 3001 是用户正在跑的应用后端，验证新路由/改 local-server.mjs 后必须用 3019 独立实例（改码须重启进程）。
 
 ## Adding A New Debug Page
 

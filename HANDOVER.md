@@ -1043,3 +1043,110 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 - **上一个会话遗留的装机监视器**（session_ca1941 的后台 bash）会在新 APK 出现时自动 `adb install -r` 并**长期持有 APK 文件句柄**（卡在 vivo 确认框时），导致后续 gradle packageRelease "Unable to delete directory" 反复失败。定位手段：Restart Manager 脚本（.tmp-findlocker.ps1 思路，RmGetList 需要 pnProcInfo 预置缓冲区大小）→ 找到 `adb` PID → 杀旧会话 bash 链。
 - vivo 安全守护确认框坐标会变（本轮出现「超级守护」开启提示后按钮下移）：每次先 uiautomator dump 取「已了解应用的风险检测结果」与「继续安装」的实际 bounds 再 tap，不要用记忆坐标。
 - `adb exec-out screencap -p` 在多显示器 vivo 上会向 stdout 混入 "[Warning] Multiple displays..." 前缀导致 PNG 损坏；用 `screencap -p /data/local/tmp/x.png` + `adb pull`。
+
+## 39. WE 联动同步修复 + 粒子系统 + 音频响应（2026-10-23）
+
+用户要求「参照 Wallpaper Engine 软件，继续完善桌面模式 wallpaper 同步功能，支持大部分创意工坊壁纸」。本机实测 11 个工坊壁纸（1 video + 10 scene 全 .pkg），**10 个场景全部含粒子对象**——粒子是覆盖率最大缺口。
+
+### 39.1 同步链路修复（M1）
+
+- **scene 同步修复（核心 bug）**：DesktopView 的 `wallpaper-changed` 回调原本手写了一份「只认 video」的分支 → 同步开启时 WE 切到场景/网页壁纸应用不跟随（scene 落到静态图分支显示 Windows 壁纸）。现在推送路径与挂载路径共用 `wallpaperResultToSource()`（desktopWallpaperManager.ts，已导出），video/web/scene/image 一处收口。
+- **web 壁纸真渲染**：main.cjs `getWallpaperEngineSource()` 的 web 分支不再「找不到视频就标 unsupported」→ 返回 `{sourceType:'web', path:目录, entry:入口html}`（目录内确有视频仍优先按 video）。3001 新增静态路由 `/api/wallpaper-engine/web/<b64url(目录)>/<相对路径>`（安全口径同 scene/asset：目录必须在 WE 根内、防穿越、扩展名白名单），html 响应注入 `<base>` 解决壁纸根绝对路径资源 404。渲染端 iframe 通道（DesktopView 背景层既有）直接承接。
+- **多屏签名**：main.cjs 新增 `getWallpaperEngineMonitorFiles()`，watcher 签名纳入 selectedwallpapers **全部 monitor** 的 file+mtime+size → 副屏换壁纸也触发推送（渲染端仍只渲染 Monitor0）。
+- `wallpaperResultToSource` 容忍 watcher payload 缺 `success` 字段（只对显式 false 判失败）。
+
+### 39.2 音频响应（M2）
+
+- 新增 `src/services/wallpaperEngineScene/spectrumBus.ts`：rAF 自驱动频谱总线（有订阅者才跑）。App 挂载时 `registerWeAudioSource()`（本地 `audioPlayer.analyserNode` + 外部播放 WASAPI loopback 频谱 `externalSpectrumRef` + 播放态判定，语义同 App 桌面频谱 tick）；WallpaperEngineSceneCanvas 订阅后每帧 `renderer.setAudioSpectrum()`。
+- renderer 供值 `g_AudioLoudness`（全频均值）+ `g_Audio16/32/64/96`（N 段均值重采样，0..1）；无音频全 0（WE 静置语义）。App 的 100ms 频谱 tick 太粗，总线独立 rAF 采样（64 bins 对数分布 + 快攻慢释平滑）。
+
+### 39.3 粒子系统 v1（M3）
+
+- **服务端**（local-server.mjs）：manifest 不再过滤粒子对象。`buildSceneObject` 解析 `obj.particle/particles` → `entry.type='particle'`，`parseParticleSystem()` 内联粒子 JSON（emitter/initializer/operator 原样、材质取 passes[0] 的 blending+textures[0]、children 一层、instanceoverride、maxcount/starttime/animationmode/sequencemultiplier）。未知算子记 `particle:op:<名>`、trail/rope 渲染器降级记 `particle:trail-renderer`（进 unsupportedSummary，仅诊断不阻断）。
+- **spritesheet 帧网格**：`.tex` 头部 `flags bit4` = spritesheet 标记（birdspritesheet1/rain blank 实测），画布尺寸/单帧尺寸（imageWidth/Height 字段）→ `buildTextureInfo` 派生 `sheetColumns/sheetRows` 下发。
+- **前端**（新模块 `src/services/wallpaperEngineScene/particles.ts`）：CPU 模拟（SoA Float32Array 池，swap-with-last 紧凑化，上限 min(maxcount×count, 4096)）+ WebGL2 instanced billboard（共享 quad loc0 + 实例 loc1..5：pos/size/color/rotSinCos/uvRect，divisor 1）。挂载时 warmup（1/30s 步长模拟 min(starttime+6s, 10s)），雨雪挂载即满屏。
+- **v1 算子覆盖**：emitter sphererandom/boxrandom；initializer lifetime/size/velocity/color/alpha/rotation/angularvelocity/turbulentvelocityrandom（近似）；operator movement/alphafade（fade 时长按寿命占比）/sizechange/alphachange/colorchange/oscillateposition/oscillatealpha/oscillatesize/angularmovement/turbulence（伪噪声近似）/vortex（切向近似）。rope/ropetrail/spritetrail 降级 sprite。boids/controlpointattract/remapvalue/mapsequence 不支持（粒子照常渲染）。
+- **实测**（debug-we-scene.html probe，本机库逐一验证）：雪境（大雪+雾+烟 ✓）、铃芽（树叶+流星 ✓）、虹夏（流星/灰烬/风带 ✓）、Girl and Samurai（23 粒子系统 ✓）、芙莉莲 MPGB/千咲/伊蕾娜 ✓——8/10 场景粒子可见、无粒子管线致命错误。
+- `hasRenderableObjects()` 现计入 particle/puppet/text 对象（纯粒子场景不再误回退静态图）。
+
+### 39.4 已知边界与存量问题
+
+- **土星 3589454154 / 实时太阳系 3662790108**：manifest 500「Invalid string length」——两场景 130/847 对象的内联着色器文本超过 V8 字符串上限（JSON.stringify 崩），**存量问题与本次无关**（两场景无粒子对象）。要解需把 manifest 改流式序列化或着色器下沉按需拉取。
+- 鸣潮/千咲等场景控制台少量「着色器编译失败」= 个别材质 pass 转译问题（既有机制：跳过该 pass 继续画）。
+- 粒子 v1 简化：children 不跟随父粒子位置（同变换并行发射）；spritesheet sequence 播帧用寿命占比×倍速近似 WE 的 frac(lifetime)；turbulence/vortex 是观感近似。
+- application(.exe) 壁纸维持回退+提示；sound 对象维持不支持（音乐应用静音语义）；WE 用户属性（wproperties）未同步（本机 wproperties 为空、样例 userProps 全 0）。
+
+### 39.5 「白色旋转条」排查修复（2026-10-23 晚，用户报告鸣潮壁纸白条）
+
+- **现象**：鸣潮 Mornye（3615984066）场景出现绕中心旋转的纯白斜条。
+- **根因三层**：
+  1. 白条本体 = 对象「置于图层前/后」（id 36/47）：solidlayer 纯色占位层 + 对象级效果链（video/spin/opacity）。flat 基底 pass 以 g_Alpha=1 画出不透明白 quad（512×512 × scale 2.59×0.56 + 对象 angles ≈ 斜条；spin 效果部分生效产生旋转观感）。
+  2. 效果链里的 video.frag 实为**环形音频频谱可视化**着色器，用了 HLSL 特有的 `float[N]` 双重下标 `X[barID/4][barID%4]`（WE 引擎按 vec4[N/4] 打包上传）+ `%` 运算符 → GLSL ES 编译失败 → 链断 → 只剩白基底。
+  3. 另有 caustics 的 vec4→vec2 截断错误（Magic Circle 对象，pass 跳过非阻塞）。
+- **修复**（wallpaper-engine-scene.mjs + local-server.mjs）：
+  - normalizeD3dPermissivePatterns 新增规则⑥：`g_AudioSpectrum*` 双重下标线性化 `X[int(float(e1)*4.0+float(e2))]`（≡barID，注意 e1 可能已被核心转译 int() 包裹须先 float() 回来），索引内 `%` → `mod()`；规则② vec3 截断扩展到 vec2。
+  - buildSceneObject 收口：solidlayer 带对象级效果链时丢弃 flat 基底 pass（unsupported 记 solidlayer-base-dropped）——WE 语义下纯色只是链输入，链挂了对象应不可见而不是白条。
+  - renderer 供值 g_AudioSpectrum{N}Left/Right（uniform1fv，复用频谱重采样）。
+- **验证**：headless Edge CDP 截图（%TEMP%\we-shots\cdp-shot.mjs）对比修复前后——白条消失，场景完整；video 链仍有 `mix(vec3,vec4,float)` 重载残余（效果暂不显示，非白条问题，记为已知限制）。
+- 注意：用户正在运行的 dev:electron 后端（3001）需重启才能拿到新转译器。
+
+## 40. WE 场景 mesh 模型路径五修：土星全通（2026-10-24）
+
+承接 31.4 存量问题的攻坚轮。着色器内联超限已由「shaderRef + `/scene/shaders` 批量下发」解决（manifest 只留引用，渲染端拉取水合；太阳系 847 对象 manifest 从 500 恢复 200）。本轮攻克 mesh 模型对象（土星/官方示例等）全黑的五层根因，**自上而下全部修复并截图验收**：
+
+1. **MDLV0023 材质路径是 UTF-8**（local-server.mjs `parseMdlModel`）：mdl 头部 null 结尾的材质 json 路径按 latin1 解会把中文路径变乱码 → readJson 全失败 → mesh 对象 passes=[] 全黑（土星 3589454154 实测仅纯 ASCII 路径的 s1 侥幸可用）。改 `buf.slice(strStart, strEnd).toString('utf8')`。
+2. **g_NormalModelMatrix 未上传**（renderer.ts `setBuiltinUniforms`）：WE 标准材质顶点着色器 `mul(localNormal, g_NormalModelMatrix)`（行向量语义 = Nᵀ·n），要得正确法线变换需上传 N = 模型线性部分 3×3 的逆（列主序 `uniformMatrix3fv` transpose=false）；此前缺省全 0 → NaN → 光照钳成黑。含行列式退化回退单位阵。
+3. **constantshadervalues 规范化**（local-server.mjs `collectMaterialPasses`）：材质 json 键常大写（Color/Alpha）而 shader uniform 的 material 名小写；`{user,value}`/`{script,value}` 绑定需取 `.value`。规范化后土星天空盒 alpha=0 不可见问题消失。
+4. **renderMeshObject 忽略 worldMatrix**（renderer.ts）：服务端已按 parent 链算好 `object.worldMatrix`（含自身 origin/angles/scale），渲染端此前本地合成导致父子变换丢失（土星陨石群全叠原点）。有 worldMatrix 用之，否则保留本地 T·Rz·Ry·Rx·S 兜底。
+5. **LightingV1 uniform 布局落地**（renderer.ts，自 wallpaper64.exe 逆向）：`g_LPoint_Origin=(xyz,exponent)`、`g_LPoint_Color=(rgb×intensity,radius)`、`g_LDirectional_Direction=(xyz,0)`、`g_LDirectional_Color=(rgb×intensity,0)`；scene.json 的 ldirectional origin 是光行进方向，shader 取表面→光 = 取反归一化；点光衰减 `falloff=saturate(1-dist/radius)`；场景声明光源时清掉兜底头灯（positions/colors fill 0），无颜色槽位置 0。
+
+**验证**（探针 `debug-we-scene.html?id=...&server=same` + electron 截图）：土星 3589454154 完整出图（星空背景/土星晨昏线条纹/环颗粒/dock 时钟）；6 工坊场景回归通过（雪境/铃芽/芙莉莲/虹夏正常，千咲/3660962877 为视频帧相位非回归）；官方模型场景 techno/demon_core/dna_fragment/fantasticcar/arsenal 出图正确（arsenal 本身即「全黑环境+两盏点光打手枪」）。
+
+**太阳系 3662790108（847 对象）**：manifest/shaders/asset 全 200、探针能就绪渲染（星空/行星/坐标网格/场景光 lpoint 均下发生效），但**加载需 2~4 分钟**——256 张纹理含数张 128MB 的 8K 图，3001 的 .tex 处理同步阻塞事件循环、请求串行排队。已知问题待优化（候选：asset 端点异步化/纹理并发流水线/客户端按可视优先加载）。另 GPU 截图偶发 UnknownVizError（capturePage 抖动），截图脚本已加退避重试。**观感精修项（未做，与官方 preview 对比）**：太阳本体应自发光（现 N·L≈0 渲染成暗柱）、整体亮度偏暗、透视取景以最大 mesh 为主体与官方「太阳居中」构图有出入——属于该场景调优，不阻塞加载链路。
+
+**其它**：`attachV3Engine.persistence.test.ts` 两条防抖用例在全量并发下偶发 5s 超时（单独跑通过）——负载抖动，非本轮改动引入。本轮 `npm run lint` 通过；v3 引擎 324+ 用例、test/ 2442 用例除上述抖动外全绿。
+
+## 41. D3D 宽松语义转译三修（⑦⑧⑨）：鸣潮 video 效果链全通（2026-10-24）
+
+承接 31.4 遗留任务 #2。鸣潮 3615984066 的环形频谱视频着色器（scene.pkg 内 `shaders/workshop/3605510527/effects/video.frag`）此前编译失败，实测是三个 D3D 宽松语义 GLSL 不接受的写法，全部在 `normalizeD3dPermissivePatterns`（wallpaper-engine-scene.mjs）以**通用规则**修复（无特判）：
+
+- **⑦ mix 实参维数不匹配**：`vec4(mix(u_userNewColor(vec3), col(vec4), step), 1.0)`——D3D 对内建函数实参隐式升维（小→大，补 1.0），GLSL 直接编译失败。等价改写：小的实参包 `vecN(x, 1.0)`（`fixMixDimMismatch`，按已收集的变量声明维数循环重扫）。注意首版曾把方向搞反（包成小维数），已修。
+- **构造器扁平化**：`vecN(mix(小维数…), 尾参…)` 且内层 mix 结果维数==N 时，剥掉外层构造器（D3D 构造器按「组件扁平化」取前 N 个分量、多余实参忽略；此处剥构造器 ≡ 扁平化自身，尾参被截掉；`flattenVecConstructor`）。
+- **⑧ return 隐式截断**：`vec3 drawSence() { vec4 col …; return col; }`——D3D 允许 vec4→声明 vec3 静默截前 3 分量，GLSL 报 return type mismatch。`fixReturnTruncation` 逐函数：函数头正则定位 + `matchBracket` 取函数体区间，`return <高维id>;` 补 `.xyzw'.slice(0, n+1)` swizzle。**实现坑**：函数体起点必须用 `head.index`（正则 match 的 index），早期版本误用字符串上不存在的 `.index` 得 NaN → matchBracket 永远 UNBALANCED 静默 break。
+- **⑨ 声明赋值维数截断**（同轮顺带）：`vec2 causticsCoords = v_TexCoord;`（vec4→vec2 声明赋值，D3D 静默截断）——按变量名声明维数表给右值补 swizzle。
+
+**验证**：鸣潮 3615984066 着色器编译失败清零、完整出图（_v75-mornye-final.png，PROBE_READY=true）；回归土星 3589454154（mesh/LightingV1 路径）与芙莉莲（2D 纹理路径）均无误伤。芙莉莲仅剩一条既有 `Simple_Audio_Bars`（uint + const int 比较，`ERROR: 0:484`）编译失败，属 31.4 已知「少量着色器编译失败 → 跳过该 pass 继续画」类，与三新规则无关——**uint/int 类残余是下一类通用规则的候选**（31.4 修复 pass 已处理部分赋值场景）。
+
+## 42. 粒子系统 v2：children 跟随 / spritesheet 精确播帧 / 真实 turbulence（2026-10-24）
+
+对照本机 WE 官方资源（`D:/SteamLibrary/steamapps/common/wallpaper_engine/assets/`，含 `shaders/common_particles.h`、`genericparticle.vert/frag`、`particles/example*.json`、`materials/particle/**/*.tex-json`）逐项核实语义后实现（src/services/wallpaperEngineScene/particles.ts + renderer.ts + local-server.mjs buildTextureInfo）：
+
+1. **spritesheet 精确播帧**：权威元数据在同名 `<name>.tex-json` 的 `spritesheetsequences[0]`（fire1: frames=64, duration=1 秒）。WE 引擎 `ComputeSpriteFrame = floor(frac(lifetime)*numFrames)`——lifetime 循环滚动，**每 duration 秒走完一张序列、与粒子寿命无关**；v1 把整张表摊到寿命上是慢 3 倍的根因。server 从 tex-json 读 `sheetFrames/sheetDuration` 下发（buildTextureInfo），渲染端 `phase = age*sequencemultiplier/duration` 推帧；缺 tex-json 回退寿命摊帧（v1 行为）。`randomframe` 修正为**随机入场相位后续播**（spawn 存 framePhase 0..1，帧 = frac(phase+offset)*numFrames），不再是永久冻帧。SPRITESHEETBLEND（相邻帧交叉淡化，common_particles.h 输出双帧 UV + frameBlend）官方资产零使用，不实现。
+2. **children 跟随父粒子**：WE 编辑器语义是每个父粒子都是子系统的发射器（子系统 rate = 每父粒子每秒生成数）。v2 子系统跳过自身 emitter，update(dt, parent) 从父系统存活粒子随机挑位发射（数学上等价逐父累积）；renderer 先父后子推进、warmup 先父后子。实测 3687818927（Birds 3 系统 [1,1,1]、落叶 [3,5]）子粒子存活。
+3. **真实 turbulence**：`turbulence` 算子改为 **curl noise**（ψ = 三个偏移 3D simplex 场的旋度，Gustavson 解析导数版移植，无散度流场）。WE 字段（exampleturbolence.json 实测）：scale=像素→噪声空间坐标缩放（0.0053）、speedmin/speedmax=速度幅（每粒子稳定随机）、timescale=时间维演化速度（可负，引擎映射 ×0.01）。v1 的 mask/phase 正弦近似删除（非 WE 字段）。
+
+**验证**：3622495963（turbulence+children×3 芙莉莲立体书）/ 3650475846（64/1 序列风马旗）/ 3669680904（8/1+4/1 序列雪景芙莉莲）/ 3687818927（children 铃芽门）四场景 electron GPU 截图全过，SHOT_EVAL 探 `particleStates` 确认子粒子存活；`npm run lint` 过；vitest 2593 用例除既有 attachV3Engine.persistence 防抖抖动（见 32）外全绿。3669680904 画面中上部有一个小方框+圆盘图形元素，疑为场景自身对象（非粒子形态），未深究。
+
+## 43. WWGL 主渲染链接入 + WE 设置独立化 + 播放参数（2026-11-03 ~ 11-14）
+
+### 43.1 WebWallGL 主渲染链（2026-11-03）
+- **链路**：WWGL（npm `webwallgl`，MIT，第三方完整复刻 WE 场景引擎）为主渲染 → 自研 legacy renderer 兜底 → 静态 preview。组件 `WallpaperEngineSceneHost`（渲染器仲裁：`weRendererOverrides`/`weRendererDefault` localStorage 可覆盖）→ `WallpaperEngineWwglCanvas` / `WallpaperEngineSceneCanvas`。
+- **依赖落账**：`package.json` 精确 pin `webwallgl 3.0.1` + overrides `mediabunny 1.65.0`（均为 2026-11-07 全库回归实测验证的版本；registry 上 3.0.2 未验证，勿盲目升）。源路由 `/api/wallpaper-engine/scene/wwgl/<id>/`（+b64 目录模式）。
+- **Electron 鉴权要点**：renderer 必须用 `getApiOrigin()` 绝对地址（相对路径落 vite spa-fallback → parsePkg 魔数误报）。
+
+### 43.2 全库回归与已知缺陷（2026-11-07）
+- 21 scene 双渲染器全量回归（截图+亮度统计+目检，`.workbuddy/wwgl/regression-1107/`）：WWGL 19/21 ✅。
+- **WWGL 缺陷 3 张 → `DEFAULT_LEGACY_IDS` 强制 legacy**：土星 3589454154 + 太阳系 3662790108（SYKM，3D model 静默不绘制）+ 鸣潮 3615984066（2026-11-14 用户报告：WWGL 中部倾斜白带 + 左侧洗白，探针 A/B 复现、legacy 15 对象全正常）。上游 issue 草稿 `.workbuddy/wwgl/issue-draft-wwgl-3d-model.md`（含两个缺陷族）。
+- legacy 兜底自身缺陷 4 张（伊蕾娜/neon_sunset/shimmering_particles/arsenal 黑屏，均 WWGL 正常，主链无碍）。
+
+### 43.3 WE 设置独立弹窗（2026-11-09 ~ 11-14）
+- **液态玻璃弹窗** `WallpaperEngineSettingsDialog`（v2：渐变描边包边+氛围光斑+网格 stagger+图片淡入）。**入口=桌面模式悬浮按钮**（Wallpaper 图标，TV 隐藏）——曾挂桌面设置弹窗主菜单「浏览壁纸引擎」，因两层弹窗叠放（设置弹窗不关 + WE 叠上）已整体移出，DesktopSettingsModal 不再透传任何 WE props。
+- 桌面设置弹窗曾做「独立 Electron 窗口」方案，后按需求整体回退（勿复用）。
+
+### 43.4 播放参数（2026-11-13）
+- `wallpaperEnginePlayback.ts`（volume/fpsLimit/parallaxEnabled/audioReactiveEnabled，localStorage + 事件广播）贯穿 Dialog → DesktopView → SceneHost → 双画布/renderer。
+- ⚠️ WWGL `volume` 挂载默认 0 静音起步（自动播放策略）——此前场景音频恒无声，本次 setVolume 接线后首次可出声；视频壁纸走 `<video>.volume`，与既有静音快捷键正交。
+- WWGL 视差须外部 `pushPointer` 喂（库的 PointerSource 未接线）；legacy `setFpsLimit` 跳帧=时间随墙钟只丢渲染。
+
+### 43.5 场景时间保持（2026-11-11）
+- 桌面模式被切走（App `parkedDesktop` 只隐藏不卸载）→ 场景 `paused={suspended}` 贯穿渲染链：WWGL `pause()/resume()`、legacy `setPaused()`（rAF 停循环、资源保留、恢复时间随墙钟继续流不重播过场动画）；挂载发生在冻结期也能对齐暂停态。

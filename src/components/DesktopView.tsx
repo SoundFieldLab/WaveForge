@@ -7,7 +7,7 @@ import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } f
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
 import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Search, Settings, Play, Clock, Volume2, VolumeX, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
+import { ChevronDown, Search, Settings, Play, Clock, Volume2, VolumeX, Captions, Heart, MonitorSmartphone, Speaker, Wallpaper } from 'lucide-react'
 import PluginShortcuts from './PluginShortcuts'
 import PlaylistCarousel3D from './PlaylistCarousel3D'
 import PlaylistContextMenu from './PlaylistContextMenu'
@@ -29,7 +29,7 @@ import { PlatformLogo, PlatformPillCarousel } from './PlatformSwitcher'
 import { getAppleLibraryPlaylists, getAppleLibrarySongs, getAppleFavoriteSongs, getAppleRecentPlayed, appleLibraryTrackToSong, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, appleSongToSong, updateApplePlaylist, deleteApplePlaylist, removeAppleTracksFromPlaylist, getLastAppleMutationResult, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
 import { sodaMediaToSong } from '../services/sodaService'
 import { mergeAppleRecentPlayback } from '../services/appleRecentPlayback'
-import { desktopWallpaperManager, DesktopLiveWallpaperSource, toWallpaperUrl } from '../services/desktopWallpaperManager'
+import { desktopWallpaperManager, DesktopLiveWallpaperSource, liveWallpaperSignature, toWallpaperUrl, wallpaperResultToSource } from '../services/desktopWallpaperManager'
 import { deletePlaylist, getCachedUserPlaylists, getPlaylistDetail, getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks, subscribePlaylist, updatePlaylist } from '../services/playlistService'
 import { useColorThief } from '../hooks/useColorThief'
 import {
@@ -53,8 +53,18 @@ import {
   type WallpaperEngineRotationSettings,
   type WallpaperEngineWallpaper,
 } from '../services/wallpaperEngineRotation'
+import {
+  WALLPAPER_ENGINE_PLAYBACK_EVENT,
+  loadWallpaperEnginePlaybackSettings,
+  saveWallpaperEnginePlaybackSettings,
+  type WallpaperEnginePlaybackSettings,
+} from '../services/wallpaperEnginePlayback'
+import { WallpaperEngineSceneRenderer } from '../services/wallpaperEngineScene/renderer'
+import { WallpaperEngineSceneHost } from './WallpaperEngineSceneHost'
 
 const LazyDesktopSettingsModal = lazy(() => import('./DesktopSettingsModal'))
+// Wallpaper Engine 设置独立弹窗（液态玻璃）：桌面模式悬浮按钮直接打开
+const LazyWallpaperEngineSettingsDialog = lazy(() => import('./WallpaperEngineSettingsDialog'))
 const LazySearchPanel = lazy(() => import('./SearchPanel'))
 const LazyPlaylistGrid3D = lazy(() => import('./PlaylistGrid3D'))
 const LazyLoginView = lazy(() => import('./LoginView'))
@@ -572,6 +582,33 @@ function DesktopView({
     ? desktopLiveWallpaper.url
     : null
 
+  // WE 壁纸播放参数（音量/帧率/视差/音频响应）：桌面设置弹窗改，渲染链消费
+  const [wallpaperPlayback, setWallpaperPlayback] = useState<WallpaperEnginePlaybackSettings>(
+    () => loadWallpaperEnginePlaybackSettings(),
+  )
+  // WE 设置独立弹窗：桌面模式悬浮按钮直接打开（不经过桌面设置弹窗，避免双层弹窗叠放）
+  const [weDialogOpen, setWeDialogOpen] = useState(false)
+  const updateWallpaperPlayback = useCallback((next: WallpaperEnginePlaybackSettings) => {
+    const normalized = saveWallpaperEnginePlaybackSettings(next)
+    setWallpaperPlayback(normalized)
+  }, [])
+
+  // 其他入口（未来多窗口/调试页）写播放设置时同步本地状态
+  useEffect(() => {
+    const handlePlaybackChange = (event: Event) => {
+      const detail = (event as CustomEvent<WallpaperEnginePlaybackSettings>).detail
+      if (detail) setWallpaperPlayback(detail)
+    }
+    window.addEventListener(WALLPAPER_ENGINE_PLAYBACK_EVENT, handlePlaybackChange)
+    return () => window.removeEventListener(WALLPAPER_ENGINE_PLAYBACK_EVENT, handlePlaybackChange)
+  }, [])
+
+  // 壁纸视频音量：跟随播放参数（静音快捷键走 video.muted，与音量独立）
+  useEffect(() => {
+    const video = videoRef.current
+    if (video) video.volume = Math.min(1, Math.max(0, wallpaperPlayback.volume / 100))
+  }, [wallpaperPlayback.volume, desktopVideoUrl])
+
   // Chromium 会在 video DOM 离开页面后继续保留解码器和媒体缓冲。
   // 使用稳定的 ref 生命周期主动断开 src，确保离开桌面模式或切换壁纸时销毁媒体管线。
   const setDesktopVideoRef = useCallback((video: HTMLVideoElement | null) => {
@@ -822,6 +859,18 @@ function DesktopView({
       } else if (wallpaper.type === 'image') {
         setDesktopWallpaper(`${getApiBase()}/wallpaper-engine/media?id=${encodeURIComponent(wallpaper.id)}&file=${encodeURIComponent(wallpaper.file)}`)
         setDesktopLiveWallpaper(null)
+      } else if (wallpaper.type === 'scene' && WallpaperEngineSceneRenderer.isSupported()) {
+        // 场景壁纸：WebGL2 可用时走实时渲染（失败由画布组件回调回退静态预览）
+        console.log('[DesktopView] 应用场景壁纸（实时渲染）:', wallpaper.title)
+        setDesktopLiveWallpaper({
+          kind: 'wallpaper-engine',
+          sourceType: 'scene',
+          id: wallpaper.id,
+          path: wallpaper.path || '',
+          title: wallpaper.title,
+          fallbackPreview: wallpaper.preview ? `http://localhost:3001${wallpaper.preview}` : undefined,
+        })
+        setDesktopWallpaper(null)
       } else if (wallpaper.preview) {
         setDesktopWallpaper(`${getApiOrigin()}${wallpaper.preview}`)
         setDesktopLiveWallpaper(null)
@@ -1325,7 +1374,7 @@ function DesktopView({
     window.addEventListener('wallpaperSyncChanged', handleWallpaperSyncChange)
     return () => window.removeEventListener('wallpaperSyncChanged', handleWallpaperSyncChange)
   }, [])
-  
+
   // 监听卡片模糊度变化
   useEffect(() => {
     const handleBlurChange = (e: Event) => {
@@ -1421,7 +1470,7 @@ function DesktopView({
         setDesktopLiveWallpaper(null)
         setDesktopWallpaper(wallpaperUrl)
       } else if (isDesktopLiveWallpaperSource(wallpaper)) {
-        nextSignature = `live:${wallpaper.sourceType}:${wallpaper.url}:${wallpaper.path}`
+        nextSignature = liveWallpaperSignature(wallpaper)
         if (!forceReload && wallpaperSourceRef.current === nextSignature) return
         wallpaperSourceRef.current = nextSignature
         setDesktopWallpaper(null)
@@ -1472,10 +1521,12 @@ function DesktopView({
       ? window.electron.wallpaper.onWallpaperChange((wallpaper) => {
         console.log('🖼️ 系统壁纸已变化:', wallpaper)
         const settings = desktopWallpaperManager.getSettings()
-        const engine = typeof wallpaper === 'string' ? null : wallpaper.wallpaperEngine
-        
-        // 检查是否是不支持的壁纸类型
-        if (settings.wallpaperEngineEnabled && engine?.unsupported) {
+        if (!settings.wallpaperEngineEnabled) return
+        if (!wallpaper || typeof wallpaper === 'string') return
+        const engine = wallpaper.wallpaperEngine
+
+        // 不支持的壁纸类型（application 程序壁纸等）：提示 + 回退系统壁纸静态图
+        if (engine?.unsupported) {
           console.warn('[DesktopView] Unsupported wallpaper type:', engine.sourceType)
           const typeMessages: Record<string, string> = {
             scene: '3D 场景壁纸',
@@ -1486,64 +1537,48 @@ function DesktopView({
           const label = typeMessages[engine.sourceType] || '动态壁纸'
           const name = engine.title ? `「${engine.title}」` : ''
           showToastNotification(`Wallpaper Engine ${name}${label}无法实时同步，已显示静态预览`, 'warning')
-          // 回退到系统壁纸
-          const nextWallpaper = typeof wallpaper === 'string'
-            ? wallpaper
-            : wallpaper.dataUrl || wallpaper.fileUrl || wallpaper.path
-          if (nextWallpaper) {
-            const nextSignature = `image:${nextWallpaper}`
+          const fallbackUrl = toWallpaperUrl(wallpaper.dataUrl || wallpaper.fileUrl || wallpaper.path)
+          if (fallbackUrl) {
+            const nextSignature = `image:${fallbackUrl}`
             if (wallpaperSourceRef.current === nextSignature) return
             wallpaperSourceRef.current = nextSignature
             setDesktopLiveWallpaper(null)
-            setDesktopWallpaper(nextWallpaper)
+            setDesktopWallpaper(fallbackUrl)
           }
           return
         }
-        
-        // 检查是否是 Wallpaper Engine 的 video 类型（支持动态壁纸）
-        if (settings.wallpaperEngineEnabled && engine && engine.sourceType === 'video') {
-          const nextLiveWallpaper = {
-            kind: 'wallpaper-engine',
-            sourceType: engine.sourceType,
-            url: engine.mediaUrl || engine.fileUrl,
-            path: engine.path,
-            title: engine.title || '动态壁纸'
-          } as DesktopLiveWallpaperSource
-          const nextSignature = `live:${nextLiveWallpaper.sourceType}:${nextLiveWallpaper.url}:${nextLiveWallpaper.path}`
-          if (wallpaperSourceRef.current === nextSignature) return
-          wallpaperSourceRef.current = nextSignature
-          setDesktopWallpaper(null)
-          setDesktopLiveWallpaper(prev => {
-            if (prev && prev.sourceType === nextLiveWallpaper.sourceType && prev.url === nextLiveWallpaper.url && prev.path === nextLiveWallpaper.path) {
-              return prev
-            }
-            return nextLiveWallpaper
-          })
-          
-          // 如果音乐正在播放，自动静音壁纸音频
-          if (isPlaying) {
-            console.log('[DesktopView] Music is playing, auto-muting video wallpaper from Wallpaper Engine')
-            setVideoMuted(true)
-            localStorage.setItem('desktopVideoMuted', JSON.stringify(true))
-            scheduleTransientTimer(() => {
-              if (videoRef.current) {
-                videoRef.current.muted = true
-              }
-            }, 100)
-          }
-          return
-        }
-        
-        // 处理静态图片壁纸
-        const nextWallpaper = typeof wallpaper === 'string'
-          ? wallpaper
-          : wallpaper.dataUrl || wallpaper.fileUrl || wallpaper.path
-        if (settings.wallpaperEngineEnabled && nextWallpaper) {
-          const nextSignature = `image:${nextWallpaper}`
+
+        // 统一映射（与挂载路径共用 wallpaperResultToSource）：video/web/scene/image 一处收口。
+        // 之前这里手写了一份只认 video 的分支 → 同步状态下 WE 切到场景/网页壁纸时应用不跟随。
+        const source = wallpaperResultToSource(wallpaper)
+        if (!source) return
+
+        if (typeof source === 'string') {
+          // 图片/回退静态图
+          const nextSignature = `image:${source}`
           if (wallpaperSourceRef.current === nextSignature) return
           wallpaperSourceRef.current = nextSignature
           setDesktopLiveWallpaper(null)
-          setDesktopWallpaper(toWallpaperUrl(nextWallpaper))
+          setDesktopWallpaper(toWallpaperUrl(source))
+          return
+        }
+
+        const nextSignature = liveWallpaperSignature(source)
+        if (wallpaperSourceRef.current === nextSignature) return
+        wallpaperSourceRef.current = nextSignature
+        setDesktopWallpaper(null)
+        setDesktopLiveWallpaper(source)
+
+        // 如果音乐正在播放，自动静音视频壁纸音频（web 壁纸跑在 iframe 里，音频由壁纸自身控制）
+        if (source.sourceType === 'video' && isPlaying) {
+          console.log('[DesktopView] Music is playing, auto-muting video wallpaper from Wallpaper Engine')
+          setVideoMuted(true)
+          localStorage.setItem('desktopVideoMuted', JSON.stringify(true))
+          scheduleTransientTimer(() => {
+            if (videoRef.current) {
+              videoRef.current.muted = true
+            }
+          }, 100)
         }
       })
       : undefined
@@ -2249,8 +2284,7 @@ function DesktopView({
             willChange: 'auto'
           }}>
             {desktopLiveWallpaper.sourceType === 'video' ? (
-              <video
-                key={desktopVideoUrl}
+              <video                key={desktopVideoUrl}
                 ref={setDesktopVideoRef}
                 className="absolute inset-0 h-full w-full object-cover"
                 style={{
@@ -2290,10 +2324,28 @@ function DesktopView({
                 }}
                 onError={(e) => {
                   console.error('[DesktopView] 视频加载错误:', e)
+                  if (wallpaperSyncEnabledRef.current) {
+                    // 联动模式：skipToNextWallpaper 会静默 return（联动时禁止手动选壁纸），
+                    // 原实现这里什么都不做 → 壁纸层永久黑屏。至少给出明确提示。
+                    showToastNotification('Wallpaper Engine 同步壁纸加载失败，请检查 Wallpaper Engine 与本地服务是否在运行', 'error')
+                    return
+                  }
                   showToastNotification('视频加载失败，正在切换到下一个壁纸...', 'error')
                   scheduleTransientTimer(() => {
                     skipToNextWallpaper()
                   }, 1500)
+                }}
+              />
+            ) : desktopLiveWallpaper.sourceType === 'scene' ? (
+              <WallpaperEngineSceneHost
+                wallpaperId={desktopLiveWallpaper.id || desktopLiveWallpaper.path || ''}
+                paused={suspended}
+                playback={wallpaperPlayback}
+                onFinalFail={(reason) => {
+                  console.warn('[DesktopView] 场景实时渲染失败（wwgl+legacy），回退静态预览:', reason)
+                  showToastNotification('该场景壁纸暂不支持实时渲染，已显示静态预览', 'info')
+                  setDesktopWallpaper(desktopLiveWallpaper.fallbackPreview || null)
+                  setDesktopLiveWallpaper(null)
                 }}
               />
             ) : (
@@ -2750,6 +2802,29 @@ function DesktopView({
               </motion.button>
               )}
 
+              {/* Wallpaper Engine 设置按钮：直接打开独立液态玻璃弹窗（TV 无真实桌面，隐藏） */}
+              {!isTvUi && (
+              <motion.button
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => {
+                  closePlaylistCarousel()
+                  setWeDialogOpen(true)
+                }}
+                title="Wallpaper Engine 设置"
+                className="rounded-full flex items-center justify-center transition-all"
+                style={{
+                  width: '48px',
+                  height: '48px',
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
+                }}
+              >
+                <Wallpaper className="w-5 h-5 text-white" />
+              </motion.button>
+              )}
+
               {/* 设置按钮 */}
               <motion.button
                 whileHover={{ scale: 1.1 }}
@@ -2908,15 +2983,7 @@ function DesktopView({
           <LazyDesktopSettingsModal
         show={showSettings}
         onClose={() => setShowSettings(false)}
-        weWallpapers={weWallpapers}
-        weLoading={weLoading}
-        weError={weError}
-        selectedWeWallpaper={selectedWeWallpaper}
         wallpaperSyncEnabled={wallpaperSyncEnabled}
-        onScanWeWallpapers={scanWeWallpapers}
-        onSelectWeWallpaper={selectWeWallpaper}
-        wallpaperRotation={wallpaperRotation}
-        onWallpaperRotationChange={updateWallpaperRotation}
         onWallpaperSyncToggle={handleWallpaperSyncToggle}
         neteaseLoggedIn={neteaseLoggedIn}
         qqLoggedIn={qqLoggedIn}
@@ -2929,6 +2996,25 @@ function DesktopView({
       />
         </Suspense>
       )}
+
+      {/* Wallpaper Engine 设置独立弹窗（液态玻璃）：桌面模式悬浮按钮直接打开 */}
+      <Suspense fallback={null}>
+        <LazyWallpaperEngineSettingsDialog
+          show={weDialogOpen}
+          onClose={() => setWeDialogOpen(false)}
+          weWallpapers={weWallpapers}
+          weLoading={weLoading}
+          weError={weError}
+          selectedWeWallpaper={selectedWeWallpaper}
+          wallpaperSyncEnabled={wallpaperSyncEnabled}
+          onScanWeWallpapers={scanWeWallpapers}
+          onSelectWeWallpaper={selectWeWallpaper}
+          wallpaperRotation={wallpaperRotation}
+          onWallpaperRotationChange={updateWallpaperRotation}
+          wallpaperPlayback={wallpaperPlayback}
+          onWallpaperPlaybackChange={updateWallpaperPlayback}
+        />
+      </Suspense>
 
       {customizerModuleMounted && (
         <Suspense fallback={null}>

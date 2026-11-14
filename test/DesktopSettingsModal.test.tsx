@@ -15,15 +15,7 @@ vi.mock('../src/components/MirroredGlobalSettings', () => ({
 const props = {
   show: true,
   onClose: vi.fn(),
-  weWallpapers: [],
-  weLoading: false,
-  weError: null,
-  selectedWeWallpaper: null,
   wallpaperSyncEnabled: false,
-  onScanWeWallpapers: vi.fn(),
-  onSelectWeWallpaper: vi.fn(),
-  wallpaperRotation: { enabled: false, intervalMinutes: 30, order: 'sequential' as const },
-  onWallpaperRotationChange: vi.fn(),
   onWallpaperSyncToggle: vi.fn(),
   onOpenCustomizer: vi.fn(),
 }

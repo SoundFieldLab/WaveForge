@@ -1,7 +1,7 @@
 import express from 'express'
 import { randomUUID, createHash } from 'node:crypto'
 import { fileURLToPath } from 'url'
-import { dirname, join, extname, resolve, sep } from 'path'
+import { dirname, join, extname, resolve, sep, isAbsolute } from 'path'
 import { readdir, stat, readFile, writeFile, mkdir, rm } from 'fs/promises'
 import { existsSync, createReadStream, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 // 跨平台补源日志（rotateCrossFillLogIfNeeded/getCrossFillLogStream）以 fs.xxx 命名空间调用；
@@ -17,6 +17,8 @@ import { Agent as HttpsAgent } from 'https'
 import compression from 'compression'
 import qqMusicApi from 'qq-music-api'
 import { likedMapValues } from './server/qq-liked-map.mjs'
+// Wallpaper Engine 场景壁纸实时渲染：二进制解析（pkg/tex/lz4）+ HLSL→GLSL 转译
+import { WallpaperEngineAssetSource, parseTex, parseVec3, parseVec2 } from './wallpaper-engine-scene.mjs'
 import {
   resolveKugouSongUrl,
   fetchKugouUserPlaylists,
@@ -179,6 +181,11 @@ const ALLOWED_RENDERER_ORIGINS = new Set([
   'file://',
   'null',
 ])
+// 探针/调试：WAVEFORGE_EXTRA_ORIGINS 追加临时允许源（逗号分隔，如独立端口起的前端验证实例）
+for (const extraOrigin of (process.env.WAVEFORGE_EXTRA_ORIGINS || '').split(',')) {
+  const trimmed = extraOrigin.trim()
+  if (trimmed) ALLOWED_RENDERER_ORIGINS.add(trimmed)
+}
 
 // QQ 音乐登录态只保留一份原始 Cookie，同时同步给 qq-music-api。
 // 过去 /api/qq/cookie 和 /api/qq/user/setCookie 各写一份状态，导致评论点赞、
@@ -12093,6 +12100,33 @@ async function getWallpaperEnginePathFromProcess() {
   return null
 }
 
+// 解析 libraryfolders.vdf：Steam 支持多库安装，创意工坊内容（431960）可能落在任意库盘，
+// 只看主安装路径会漏掉大部分订阅壁纸。vdf 是简单缩进文本，"path" 行即为库根目录。
+async function getSteamLibraryRoots(steamPath) {
+  const roots = []
+  if (steamPath) roots.push(steamPath)
+
+  if (steamPath) {
+    try {
+      const vdfPath = join(steamPath, 'steamapps', 'libraryfolders.vdf')
+      if (existsSync(vdfPath)) {
+        const vdfContent = await readFile(vdfPath, 'utf-8')
+        for (const match of vdfContent.matchAll(/"path"\s+"([^"]+)"/g)) {
+          // vdf 内路径用双反斜杠转义（"D:\\SteamLibrary"），还原为真实路径
+          const libraryPath = match[1].replace(/\\\\/g, '\\').trim()
+          if (libraryPath && existsSync(libraryPath) && !roots.includes(libraryPath)) {
+            roots.push(libraryPath)
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('解析 libraryfolders.vdf 失败（回退主安装路径）:', error.message)
+    }
+  }
+
+  return roots
+}
+
 // 获取所有可能的 Wallpaper Engine 路径
 // 解析结果按 customPath 做进程级缓存：每次请求 spawn 两个 PowerShell（进程查询 +
 // 注册表读取）开销大，且安装路径在运行期间不会变化；仅当 ?path= 参数变更时才重算。
@@ -12122,15 +12156,15 @@ async function resolveWallpaperEnginePaths(customPath = null) {
     }
   }
 
-  // 3. 从注册表读取 Steam 路径
+  // 3. 从注册表读取 Steam 主路径，并解析 libraryfolders.vdf 覆盖所有 Steam 库
+  //    （多库用户的创意工坊内容可装在任意库盘，只看主路径会漏）
   const steamPath = await getSteamInstallPath()
-  if (steamPath) {
-    const weProjectsPath = join(steamPath, 'steamapps', 'common', 'wallpaper_engine', 'projects')
-    paths.push(weProjectsPath)
-    
-    // 也检查 workshop 目录（Steam 创意工坊下载的壁纸）
-    const workshopPath = join(steamPath, 'steamapps', 'workshop', 'content', '431960')
-    paths.push(workshopPath)
+  const steamLibraryRoots = await getSteamLibraryRoots(steamPath)
+  for (const libraryRoot of steamLibraryRoots) {
+    paths.push(join(libraryRoot, 'steamapps', 'common', 'wallpaper_engine', 'projects'))
+
+    // 创意工坊下载的壁纸（workshop 目录名就是 workshop ID）
+    paths.push(join(libraryRoot, 'steamapps', 'workshop', 'content', '431960'))
   }
 
   // 4. 默认路径（回退选项）
@@ -12142,7 +12176,9 @@ async function resolveWallpaperEnginePaths(customPath = null) {
   ]
   paths.push(...defaultPaths)
 
-  return paths
+  // libraryfolders.vdf 总是包含主库，与进程/注册表推导出的路径高度重复 → 去重，
+  // 否则同一目录会被扫描两遍、壁纸列表出现重复条目
+  return Array.from(new Set(paths))
 }
 
 // 带进程级缓存的路径解析入口：缓存 Promise 本身，并发请求共享同一次解析；
@@ -12198,7 +12234,7 @@ app.get('/api/wallpaper-engine/scan', async (req, res) => {
       const projectJsonPath = join(wallpaperPath, 'project.json')
 
       try {
-        // 模式 1: 有 project.json 的壁纸（projects 目录）
+        // 模式 1: 有 project.json 的壁纸（projects 目录 + workshop 场景目录）
         if (existsSync(projectJsonPath)) {
           const projectData = await readFile(projectJsonPath, 'utf-8')
           const project = JSON.parse(projectData)
@@ -12207,38 +12243,121 @@ app.get('/api/wallpaper-engine/scan', async (req, res) => {
           const type = project.type || 'unknown'
           const file = project.file || ''
 
-          // 只添加简单的视频和图片壁纸
+          // 查找 WE 为每个壁纸生成的预览图（所有类型共用）
+          const findPreview = () => {
+            const possiblePreviews = ['preview.jpg', 'preview.png', 'preview.gif', 'preview.webp']
+            for (const preview of possiblePreviews) {
+              const fullPath = join(wallpaperPath, preview)
+              if (existsSync(fullPath)) return preview
+            }
+            return null
+          }
+
+          const buildEntry = (entryType, entryFile) => {
+            const previewPath = findPreview()
+            return {
+              id: entry.name,
+              title: project.title || entry.name,
+              description: project.description || '',
+              type: entryType,
+              file: entryFile,
+              preview: previewPath ? `/api/wallpaper-engine/preview?id=${encodeURIComponent(entry.name)}&file=${encodeURIComponent(previewPath)}` : null,
+              tags: project.tags || [],
+              workshop: project.workshopid || null,
+              path: wallpaperPath
+            }
+          }
+
+          // 视频/图片壁纸：主媒体文件存在即可直接播放
           if (type === 'video' || type === 'image') {
-            // 验证文件是否存在
             const mediaFilePath = join(wallpaperPath, file)
-            if (existsSync(mediaFilePath)) {
-              // 查找预览图
-              let previewPath = null
-              const possiblePreviews = ['preview.jpg', 'preview.png', 'preview.gif', 'preview.webp']
-              for (const preview of possiblePreviews) {
-                const fullPath = join(wallpaperPath, preview)
-                if (existsSync(fullPath)) {
-                  previewPath = preview
+            if (file && existsSync(mediaFilePath)) {
+              wallpapers.push(buildEntry(type, file))
+            }
+          } else if (type === 'scene') {
+            // 场景壁纸（WE 创意工坊最主流的类型）：scene.pkg 是 WE 私有编译容器
+            // （PKGV0001 魔数，内含 scene.json / .tex 纹理 / 着色器），无法直接实时渲染，
+            // 退级为 WE 自带的 preview.* 渲染截图静态展示。
+            const previewPath = findPreview()
+            if (previewPath) {
+              wallpapers.push(buildEntry('scene', file))
+            } else {
+              console.log(`   ⏭️ 场景壁纸无预览图，跳过: ${entry.name}`)
+            }
+          } else if (type === 'web') {
+            // Web 壁纸：目录里若有独立视频文件则按视频收录（可直接播放）；
+            // 否则退级为 preview.* 静态展示
+            const videoExtensions = ['.mp4', '.webm', '.mov', '.m4v']
+            let foundVideo = null
+            try {
+              const dirFiles = await readdir(wallpaperPath, { withFileTypes: true })
+              for (const dirFile of dirFiles) {
+                if (dirFile.isDirectory()) continue
+                if (videoExtensions.includes(extname(dirFile.name).toLowerCase())) {
+                  foundVideo = dirFile.name
                   break
                 }
               }
-              wallpapers.push({
-                id: entry.name,
-                title: project.title || entry.name,
-                description: project.description || '',
-                type: type,
-                file: file,
-                preview: previewPath ? `/api/wallpaper-engine/preview?id=${encodeURIComponent(entry.name)}&file=${encodeURIComponent(previewPath)}` : null,
-                tags: project.tags || [],
-                workshop: project.workshopid || null,
-                path: wallpaperPath
-              })
+            } catch (readError) {
+              console.warn(`   ⚠️ 读取 Web 壁纸目录失败: ${entry.name}:`, readError.message)
+            }
+
+            if (foundVideo) {
+              wallpapers.push(buildEntry('video', foundVideo))
             } else {
+              const previewPath = findPreview()
+              if (previewPath) {
+                wallpapers.push(buildEntry('web', file))
+              } else {
+                console.log(`   ⏭️ Web 壁纸无视频也无预览图，跳过: ${entry.name}`)
+              }
             }
           } else {
-            console.log(`   ⏭️ 跳过复杂壁纸类型: ${entry.name} (${type})`)
+            // application（exe 交互程序）等其它类型：无可展示媒体，跳过
+            console.log(`   ⏭️ 跳过不支持展示的类型: ${entry.name} (${type})`)
           }
         } else {
+          // 模式 2a: 容器目录（如 WE 官方 defaultprojects / myprojects）——壁纸工程在二级子目录
+          const childProjectDirs = []
+          try {
+            for (const child of await readdir(wallpaperPath, { withFileTypes: true })) {
+              if (child.isDirectory() && existsSync(join(wallpaperPath, child.name, 'project.json'))) {
+                childProjectDirs.push(child.name)
+              }
+            }
+          } catch { /* 忽略读取失败 */ }
+
+          if (childProjectDirs.length > 0) {
+            for (const childName of childProjectDirs) {
+              try {
+                const childPath = join(wallpaperPath, childName)
+                const childProject = JSON.parse(await readFile(join(childPath, 'project.json'), 'utf-8'))
+                const childType = childProject.type || 'unknown'
+                // 容器形态只收录场景壁纸（解包态工程）；部分官方工程（audiophile）无 type 字段但 file 是 .json 场景
+                if (childType === 'scene') { /* 放行 */ }
+                else if (!childType && /\.json$/i.test(String(childProject.file || ''))) { /* 视为场景放行 */ }
+                else continue
+                let childPreview = null
+                for (const preview of ['preview.jpg', 'preview.png', 'preview.gif', 'preview.webp']) {
+                  if (existsSync(join(childPath, preview))) { childPreview = preview; break }
+                }
+                if (!childPreview) continue
+                wallpapers.push({
+                  id: entry.name + '/' + childName,
+                  title: childProject.title || childName,
+                  description: childProject.description || '',
+                  type: 'scene',
+                  file: childProject.file || '',
+                  preview: `/api/wallpaper-engine/preview?id=${encodeURIComponent(entry.name)}&file=${encodeURIComponent(childName + '/' + childPreview)}`,
+                  tags: childProject.tags || [],
+                  workshop: childProject.workshopid || null,
+                  path: childPath
+                })
+              } catch (error) {
+                console.error(`解析容器壁纸 ${entry.name}/${childName} 失败:`, error.message)
+              }
+            }
+          } else {
           // 模式 2: 直接扫描媒体文件（workshop 目录）
           const files = await readdir(wallpaperPath, { withFileTypes: true })
           
@@ -12290,6 +12409,7 @@ app.get('/api/wallpaper-engine/scan', async (req, res) => {
             })
           } else {
           }
+          } // 模式 2a 容器分支闭合
         }
       } catch (error) {
         console.error(`解析壁纸 ${entry.name} 失败:`, error.message)
@@ -12363,46 +12483,74 @@ app.get('/api/wallpaper-engine/preview', async (req, res) => {
 })
 
 // 获取壁纸视频/媒体文件（支持 Range 请求）
+// 两种定位方式：
+// 1) id+file：相对已知 WE 根（projects / workshop content）的传统方式（手动浏览选择壁纸）
+// 2) abs：媒体文件绝对路径（桌面模式联动）。主进程读 WE config 得到的工坊壁纸绝对路径
+//    同样落在已知 WE 根内，但联动链路没有 id → 用 abs 直传。
+//    安全模型与 scene manifest 一致：规范化后必须位于已知 WE 根内 + 扩展名白名单。
+const WALLPAPER_MEDIA_ABS_EXTENSIONS = new Set([
+  'mp4', 'webm', 'mov', 'm4v', 'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif',
+])
 app.get('/api/wallpaper-engine/media', async (req, res) => {
   try {
     const { id, file } = req.query
-    if (!id || !file) {
-      return res.status(400).send('缺少参数')
-    }
-
-    // 获取所有可能的路径
-    const possiblePaths = await getWallpaperEnginePaths()
 
     let mediaPath = null
-    for (const basePath of possiblePaths) {
-      const fullPath = join(basePath, id, file)
-      // 路径穿越防护：规范化后必须仍位于 basePath 内，否则跳过该候选路径
-      const resolved = resolve(fullPath)
-      const base = resolve(basePath)
-      if (!resolved.startsWith(base + sep)) continue
-      if (existsSync(fullPath)) {
-        mediaPath = fullPath
-        break
-      }
-    }
+    let mediaExt = ''
 
-    if (!mediaPath) {
-      return res.status(404).send('媒体文件未找到')
+    if (req.query.abs && !id && !file) {
+      // 绝对路径模式（桌面模式联动）
+      const absPath = resolve(String(req.query.abs))
+      const possiblePaths = await getWallpaperEnginePaths()
+      const insideRoot = possiblePaths.some((basePath) => absPath.startsWith(resolve(basePath) + sep))
+      mediaExt = extname(absPath).slice(1).toLowerCase()
+      if (!insideRoot || !WALLPAPER_MEDIA_ABS_EXTENSIONS.has(mediaExt) || !existsSync(absPath)) {
+        return res.status(404).send('媒体文件未找到')
+      }
+      mediaPath = absPath
+    } else {
+      if (!id || !file) {
+        return res.status(400).send('缺少参数')
+      }
+
+      // 获取所有可能的路径
+      const possiblePaths = await getWallpaperEnginePaths()
+
+      for (const basePath of possiblePaths) {
+        const fullPath = join(basePath, id, file)
+        // 路径穿越防护：规范化后必须仍位于 basePath 内，否则跳过该候选路径
+        const resolved = resolve(fullPath)
+        const base = resolve(basePath)
+        if (!resolved.startsWith(base + sep)) continue
+        if (existsSync(fullPath)) {
+          mediaPath = fullPath
+          break
+        }
+      }
+
+      if (!mediaPath) {
+        return res.status(404).send('媒体文件未找到')
+      }
+      mediaExt = file.split('.').pop().toLowerCase()
     }
 
     const fileStat = await stat(mediaPath)
     const fileSize = fileStat.size
     const range = req.headers.range
 
-    const ext = file.split('.').pop().toLowerCase()
     const contentType = {
       'mp4': 'video/mp4',
       'webm': 'video/webm',
+      'mov': 'video/quicktime',
+      'm4v': 'video/x-m4v',
       'jpg': 'image/jpeg',
       'jpeg': 'image/jpeg',
       'png': 'image/png',
-      'webp': 'image/webp'
-    }[ext] || 'application/octet-stream'
+      'webp': 'image/webp',
+      'gif': 'image/gif',
+      'bmp': 'image/bmp',
+      'avif': 'image/avif',
+    }[mediaExt] || 'application/octet-stream'
 
     // 用公共解析器而不是就地 split：就地实现把后缀范围 bytes=-N 当成 0-N，
     // 取到的是文件开头而非结尾（parts[0] 为空时 start 还会变成 NaN，createReadStream 同步抛错）。
@@ -12457,6 +12605,1466 @@ app.get('/api/wallpaper-engine/media', async (req, res) => {
   } catch (error) {
     console.error('获取媒体文件失败:', error)
     res.status(500).send('获取媒体文件失败')
+  }
+})
+
+// ===========================================================================
+// Wallpaper Engine 场景壁纸实时渲染支持
+// 二进制格式与着色器契约见 wallpaper-engine-scene.mjs 头注释。
+// ===========================================================================
+
+// WE 内置 assets 根目录（通用 shader 与内置 models/materials 兜底），按进程查找 + 全部 Steam 库回退
+let weAssetsDirCache = { path: null, at: 0 }
+async function getWallpaperEngineAssetsDir() {
+  if (Date.now() - weAssetsDirCache.at < 60_000) return weAssetsDirCache.path
+  let installDir = null
+  try { installDir = await getWallpaperEnginePathFromProcess() } catch { /* 进程不在运行 */ }
+  if (!installDir) {
+    // WE 可装在任意 Steam 库（与主安装路径不同盘），遍历所有库找 wallpaper_engine
+    const steamPath = await getSteamInstallPath()
+    const libraryRoots = await getSteamLibraryRoots(steamPath)
+    for (const root of libraryRoots) {
+      const candidate = join(root, 'steamapps', 'common', 'wallpaper_engine')
+      if (existsSync(candidate)) { installDir = candidate; break }
+    }
+  }
+  const assetsDir = installDir ? join(installDir, 'assets') : null
+  weAssetsDirCache = { path: assetsDir && existsSync(assetsDir) ? assetsDir : null, at: Date.now() }
+  return weAssetsDirCache.path
+}
+
+// 按 id 定位壁纸目录（与 preview/media 端点同一路径安全模型：规范化后必须仍在根内）。
+// 支持两级查找：工坊壁纸在 <根>/<id>，WE 官方工程在 <根>/defaultprojects/<id>。
+// 另支持绝对路径 id：桌面模式联动时 Electron 主进程读 WE config 得到的是
+// project.json 完整路径，前端将其 dirname（壁纸目录）作为 id 传入，
+// 故须校验「位于已知 WE 根内 + project.json 存在」后直接返回。
+async function resolveWallpaperEngineSceneDir(id) {
+  const possiblePaths = await getWallpaperEnginePaths()
+  const idSafe = String(id)
+  // 绝对路径分支（桌面模式联动：主进程传壁纸目录绝对路径）
+  if (isAbsolute(idSafe)) {
+    const resolvedAbs = resolve(idSafe)
+    for (const basePath of possiblePaths) {
+      const base = resolve(basePath)
+      if (!resolvedAbs.startsWith(base + sep)) continue
+      if (existsSync(join(resolvedAbs, 'project.json'))) return resolvedAbs
+    }
+    return null
+  }
+  for (const basePath of possiblePaths) {
+    const base = resolve(basePath)
+    const candidates = [join(basePath, idSafe)]
+    if (idSafe.includes('/') || idSafe.includes('\\')) {
+      // 已含子路径的 id（如 defaultprojects/beach）直接试
+    } else {
+      // 二级查找：defaultprojects 等容器目录的子目录
+      try {
+        const container = join(basePath, 'defaultprojects')
+        if (existsSync(container)) candidates.push(join(container, idSafe))
+      } catch { /* 忽略 */ }
+    }
+    for (const full of candidates) {
+      const resolved = resolve(full)
+      if (!resolved.startsWith(base + sep)) continue
+      if (existsSync(join(resolved, 'project.json'))) return resolved
+    }
+  }
+  return null
+}
+
+// WE 材质贴图名 → 实际文件：materials/<name>.tex（回退 .png 等）
+function resolveTextureName(assetSource, name) {
+  const base = String(name || '').replace(/\\/g, '/')
+  const candidates = [
+    'materials/' + base + '.tex',
+    'materials/' + base + '.png',
+    'materials/' + base + '.jpg',
+    base + '.tex',
+    base + '.png',
+    base,
+  ]
+  for (const candidate of candidates) {
+    if (assetSource.has(candidate)) return candidate
+  }
+  return null
+}
+
+// 纹理解析结果缓存（路径 → parseTex 输出摘要）
+const sceneTextureCache = new Map()
+
+function buildTextureInfo(assetSource, dir, textureName) {
+  const resolved = resolveTextureName(assetSource, textureName)
+  if (!resolved) return null
+  // ⚠️ 缓存键必须含工程目录：不同工程常有同名相对路径纹理（如 razer_bedroom 与 razer_vortex
+  // 都有 materials/wave.tex 但尺寸不同），仅用相对路径会跨工程污染尺寸声明 → 渲染端
+  // texImage2D 字节数不匹配（2026-10-20 razer_vortex 白屏根因）
+  const cacheKey = dir + '|' + resolved
+  if (sceneTextureCache.has(cacheKey)) return sceneTextureCache.get(cacheKey)
+  let info = null
+  try {
+    const buffer = assetSource.read(resolved)
+    if (buffer && /\.tex$/i.test(resolved)) {
+      const tex = parseTex(buffer)
+      const mip0 = tex.images[0]?.mipmaps[0]
+      if (mip0 && !mip0.error) {
+        // WE spritesheet 标记（.tex flags bit4，bird spritesheet1 / rain blank 实测）：
+        // 画布是 N×M 帧网格、tex.width/height 是单帧尺寸 → 派生 cols/rows 供粒子逐帧 UV
+        const sheetColumns = (tex.flags & 4) && tex.textureWidth > tex.width
+          ? Math.max(1, Math.floor(tex.textureWidth / Math.max(1, tex.width)))
+          : 1
+        const sheetRows = (tex.flags & 4) && tex.textureHeight > tex.height
+          ? Math.max(1, Math.floor(tex.textureHeight / Math.max(1, tex.height)))
+          : 1
+        // 播帧元数据来自同名 <name>.tex-json 的 spritesheetsequences[0]（fire1: frames=64,
+        // duration=1 秒）——WE 引擎按 duration 循环整张序列（ComputeSpriteFrame 的
+        // frac(lifetime) 语义），与粒子寿命无关；无该文件时渲染端回退寿命摊帧
+        let sheetFrames = 0
+        let sheetDuration = 0
+        try {
+          const texJson = assetSource.readJson(resolved + '-json')
+          const seq = Array.isArray(texJson?.spritesheetsequences) ? texJson.spritesheetsequences[0] : null
+          if (seq) {
+            sheetFrames = Math.max(0, Math.round(Number(seq.frames) || 0))
+            sheetDuration = Math.max(0, Number(seq.duration) || 0)
+          }
+        } catch { /* 无 tex-json（如 pkg 内无此旁路文件）→ 保持 0 */ }
+        // 视频纹理：.tex 容器的「图像数据」是整个 MP4/WebM 文件（千咲带水印.tex 实测，
+        // mip0.data 头 = ftyp mp42）→ WE 支持材质直接引用视频，标记 video 由渲染端
+        // <video> 解码逐帧上传（按 parseTex 会被当像素解析成噪点）
+        const texData = Buffer.from(mip0.data.buffer ?? mip0.data, mip0.data.byteOffset ?? 0, Math.min(mip0.data.length, 16))
+        if (texData.length > 12 && texData.slice(4, 8).toString('latin1') === 'ftyp') {
+          info = {
+            url: '/api/wallpaper-engine/scene/asset',
+            textureFile: resolved,
+            image: 'video',
+            format: 'mp4',
+            compressed: false,
+            width: 0, height: 0, canvasWidth: 0, canvasHeight: 0,
+            clampUVs: tex.clampUVs, noInterpolation: tex.noInterpolation,
+          }
+        } else if (texData.length > 4 && texData[0] === 0x1a && texData[1] === 0x45 && texData[2] === 0xdf && texData[3] === 0xa3) {
+          info = {
+            url: '/api/wallpaper-engine/scene/asset',
+            textureFile: resolved,
+            image: 'video',
+            format: 'webm',
+            compressed: false,
+            width: 0, height: 0, canvasWidth: 0, canvasHeight: 0,
+            clampUVs: tex.clampUVs, noInterpolation: tex.noInterpolation,
+          }
+        } else {
+        const imageKind = tex.imageFormat === 13 ? 'png' : tex.imageFormat === 2 ? 'jpeg' : 'raw'
+        const pixelFormats = new Set([0, 8, 9]) // RGBA8888 / RG88 / R8 非压缩；其余走 WebGL2 压缩纹理
+        info = {
+          url: '/api/wallpaper-engine/scene/asset',
+          textureFile: resolved,
+          image: imageKind,
+          format: tex.formatName,
+          compressed: !pixelFormats.has(tex.format),
+          width: mip0.width,
+          height: mip0.height,
+          // DXT 已在服务端解码去填充时画布=图像尺寸；未解码时画布为 2 的幂
+          canvasWidth: mip0.width,
+          canvasHeight: mip0.height,
+          clampUVs: tex.clampUVs,
+          noInterpolation: tex.noInterpolation,
+          sheetColumns,
+          sheetRows,
+          sheetFrames,
+          sheetDuration,
+        }
+        }
+      }
+    } else if (buffer) {
+      info = {
+        url: '/api/wallpaper-engine/scene/asset',
+        textureFile: resolved,
+        image: /\.(png)$/i.test(resolved) ? 'png' : 'jpeg',
+        format: 'RGBA8888',
+        compressed: false,
+        width: 0, height: 0, canvasWidth: 0, canvasHeight: 0,
+        clampUVs: true, noInterpolation: false,
+      }
+    }
+  } catch (error) {
+    console.warn('[WEScene] 纹理解析失败:', resolved, error.message)
+  }
+  if (sceneTextureCache.size > 256) sceneTextureCache.clear()
+  sceneTextureCache.set(cacheKey, info)
+  return info
+}
+
+// shader 转译缓存（projectDir|shaderName|combos → 结果）
+const sceneShaderCache = new Map()
+
+// 编译后着色器源码池（sha1(vert\0frag) → {vert, frag}）：manifest 的 pass 只带 shaderRef
+// 引用，源码经 /api/wallpaper-engine/scene/shaders 批量拉取。土星 3589454154（130 对象）/
+// 实时太阳系 3662790108（847 对象）内联全文超 V8 字符串上限（JSON.stringify「Invalid
+// string length」500）——同类效果（waterwaves/blur…）在对象间大量重复，去重后总量很小。
+// 淘汰时必须连带清 sceneManifestCache：缓存的 manifest 引用着池内 hash，池清了 manifest
+// 重建才有机会重新登记。
+const sceneShaderSourceStore = new Map()
+function internShaderSource(vert, frag) {
+  const hash = createHash('sha1').update(vert + '\u0000' + frag).digest('hex')
+  sceneShaderSourceStore.set(hash, { vert, frag })
+  if (sceneShaderSourceStore.size > 2048) {
+    sceneShaderSourceStore.clear()
+    sceneManifestCache.clear()
+  }
+  return hash
+}
+
+// WE 着色器是 D3D 语义：允许顶点/片段两阶段 varying 类型不一致（片段只读子集，
+// 如 color_grading 的 vert vec4 / frag vec2 v_TexCoord）——GLSL ES 链接严格拒绝，
+// 链接报「Types of varying differ」→ 把片段 in 声明类型对齐到顶点 out 类型。
+// ⚠️ 同名 varying 可能在多个 combo 分支里声明不同类型（arsenal generic 的
+// vec4/vec2 v_TexCoord + frag 读 .zw）→ 按「声明类型集合」匹配：frag 类型在 vert
+// 集合里存在就保留（运行期按 combo 自然对上），按源码顺序取单值会把 vec4 分支
+// 降级成 vec2 → '.zw' : vector field selection out of range（arsenal 实测）。
+function alignVaryingTypes(vertCode, fragCode) {
+  const vertTypes = new Map()
+  for (const m of vertCode.matchAll(/\bout\s+(\w+)\s+([A-Za-z_]\w*)\s*;/g)) {
+    if (!vertTypes.has(m[2])) vertTypes.set(m[2], new Set())
+    vertTypes.get(m[2]).add(m[1])
+  }
+  if (!vertTypes.size) return fragCode
+  const lines = fragCode.split('\n')
+  const dropNames = []
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*in\s+(\w+)\s+([A-Za-z_]\w*)\s*;/)
+    if (!m) continue
+    const [, fragType, name] = m
+    const set = vertTypes.get(name)
+    if (!set) {
+      // frag 独有 varying（vert 无对应 out）：D3D 链接器容忍死 varying、GL 拒链
+      // （lens_flare_sun 的 timer/timer2/rotation/rotation2——声明后 main 内局部变量
+      //  遮蔽、从未真读）。删声明 + 同步清掉转译器注入的 wf_lv 拷贝行/全局副本声明。
+      lines[i] = '// [WEScene] 已删：vert 无对应 out ' + name
+      dropNames.push(name)
+    } else if (!set.has(fragType)) {
+      const last = [...set][set.size - 1]
+      lines[i] = lines[i].replace(/^(\s*)in\s+\w+/, '$1in ' + last)
+    }
+  }
+  let out = lines.join('\n')
+  for (const name of dropNames) {
+    // main 顶部拷贝行（wf_lv_x = x;）与全局副本声明（T wf_lv_x;）
+    out = out.replace(new RegExp('^\\s*wf_lv_' + name + '\\s*=\\s*' + name + '\\s*;.*\\n?', 'm'), '')
+    out = out.replace(new RegExp('^(?:lowp\\s+|mediump\\s+|highp\\s+)?\\w+\\s+wf_lv_' + name + '\\s*;.*\\n?', 'm'), '')
+  }
+  return out
+}
+
+// 跨 stage 统一 uniform 类型（frame_builder_by_gariam：vert 声明 vec2 u_refResolution、
+// frag 声明 float u_refResolution —— WE 编译器容忍，GL 链接报 "Types of uniform differ"）。
+// frag 未实际使用 → 删声明；使用了 → 声明改成 vert 的类型，vecN 时裸用补 .x。
+// ⚠️ 不处理 #define 别名（如 `#define res u_refResolution` 后用 res 当标量）——当前无实例。
+function alignUniformTypes(vertCode, fragCode) {
+  const vertTypes = new Map()
+  for (const m of vertCode.matchAll(/\buniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+((?:g|u)_\w+)\s*;/g)) {
+    if (!vertTypes.has(m[2])) vertTypes.set(m[2], m[1])
+  }
+  if (!vertTypes.size) return fragCode
+  const lines = fragCode.split('\n')
+  const declRe = /\buniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+((?:g|u)_\w+)\s*;/
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(declRe)
+    if (!m) continue
+    const [, fragType, name] = m
+    const vertType = vertTypes.get(name)
+    if (!vertType || vertType === fragType) continue
+    const rest = lines.filter((_, j) => j !== i).join('\n')
+    if (!new RegExp('(?<![\\w.])' + name + '\\b').test(rest)) {
+      lines[i] = '// [WEScene] 已删：与 vert 类型冲突且 frag 未使用 ' + name
+      continue
+    }
+    lines[i] = lines[i].replace(/uniform\s+\w+/, 'uniform ' + vertType)
+    if (/^vec[234]$/.test(vertType)) {
+      for (let j = 0; j < lines.length; j++) {
+        if (j === i) continue
+        lines[j] = lines[j].replace(new RegExp('(?<![\\w.])' + name + '\\b(?!\\s*\\.)', 'g'), name + '.x')
+      }
+    }
+  }
+  return lines.join('\n')
+}
+
+function buildShaderPass(assetSource, dir, shaderName, combos, textures, fallbackTextures) {
+  // 贴图槽驱动 combo 推导（元数据驱动版，2026-10-29）：sampler uniform 元数据声明
+  // "combo":"X"（MASK/TIMEOFFSET/OPACITYMASK…）且对应贴图槽显式绑定 → X=1（显式 combos
+  // 优先；buildShader 内仍校验源码引用 token）。WE 引擎语义 = 编辑器绑定贴图即置该 combo
+  // （材质级、跨 vert/frag 共享，声明在 frag 侧 sampler 注释里）。引擎全 effects 目录实证
+  // 槽位分布：MASK 在 tex1(×20)/tex2(×11)/tex3(×2)、TIMEOFFSET 在 tex2、OPACITYMASK 在
+  // tex3/tex7 —— 旧版槽位硬编码（tex1→MASK、tex2→TIMEOFFSET）本就不完整，且对
+  // depthparallax 失配：其 tex1=深度图（mode depth、无 combo）会被误触发 MASK=1 →
+  // 采样未绑定槽 → mask=0 → 视差失效（雪境 3669680904 背景）。
+  // require 元数据（blur_precise 的 MASK require {"ENABLEMASK":1}）在显式 combos 不满足时跳过。
+  const texList = textures && textures.length ? textures : fallbackTextures
+  const texCombos = {}
+  if (texList && texList.length) {
+    const slotCombo = new Map()
+    for (const candidate of [shaderName, 'shaders/' + shaderName]) {
+      let found = false
+      for (const ext of ['.frag', '.vert']) {
+        let raw = null
+        try { raw = assetSource.readText(candidate + ext) } catch { /* 候选不存在 */ }
+        if (raw == null) continue
+        found = true
+        for (const line of String(raw).replace(/\r\n/g, '\n').split('\n')) {
+          const m = /uniform\s+sampler2D\s+g_Texture(\d+)\s*;/.exec(line)
+          if (!m) continue
+          const jsonMatch = /\{[\s\S]*\}/.exec(line)
+          if (!jsonMatch) continue
+          try {
+            const parsed = JSON.parse(jsonMatch[0])
+            if (typeof parsed.combo === 'string' && parsed.combo) slotCombo.set(Number(m[1]), parsed)
+          } catch { /* 注释非 JSON，忽略 */ }
+        }
+      }
+      if (found) break
+    }
+    for (const [slot, parsed] of slotCombo) {
+      if (texList[slot] == null) continue
+      if (parsed.require) {
+        let ok = true
+        for (const [rk, rv] of Object.entries(parsed.require)) {
+          if ((combos || {})[rk] !== rv) { ok = false; break }
+        }
+        if (!ok) continue
+      }
+      if (combos && combos[parsed.combo] !== undefined) continue
+      texCombos[parsed.combo] = 1
+    }
+  }
+  const effCombos = { ...(combos || {}), ...texCombos }
+  const cacheKey = dir + '|' + shaderName + '|' + JSON.stringify(effCombos)
+  let compiled = sceneShaderCache.get(cacheKey)
+  if (!compiled) {
+    const candidates = [shaderName, 'shaders/' + shaderName]
+    let built = null
+    for (const candidate of candidates) {
+      try {
+        built = assetSource.buildShader(candidate + '.vert', 'vert', effCombos, texCombos)
+        if (built) {
+          const frag = assetSource.buildShader(candidate + '.frag', 'frag', effCombos, texCombos)
+          if (frag) { built = { vert: built, frag }; break }
+        }
+      } catch { /* 尝试下一候选 */ }
+    }
+    if (!built) compiled = { error: 'shader 未找到: ' + shaderName }
+    else {
+      // 全屏效果 vert（blur_precise_gaussian #else / passthrough 无 TRANSFORM 分支等）直接把
+      // a_Position 写进 gl_Position（WE 全屏 quad = clip -1..1）；我们的单位 quad 是
+      // -0.5..0.5 → 转译期改写为 *2.0。⚠️ 同时必须 Y 取反：单位 quad uv v=0 在顶、FBO
+      // 纹理 v=0 在底，正区间直接放大会让全屏 blit 上下镜像（旗子黑影/错位实测）；
+      // Y 翻转后 uv(0,0) 落屏幕左下 = FBO v=0 行 → 恒等映射。MVP 分支（VERTICAL=1）不受影响。
+      const vertCode = built.vert.code.replace(
+        /gl_Position\s*=\s*vec4\(\s*a_Position\s*,\s*1\.0\s*\)/g,
+        'gl_Position = vec4(a_Position.x * 2.0, a_Position.y * -2.0, a_Position.z, 1.0)',
+      )
+      compiled = {
+        vert: vertCode,
+        frag: alignUniformTypes(vertCode, alignVaryingTypes(built.vert.code, built.frag.code)),
+        uniforms: [...built.vert.uniforms, ...built.frag.uniforms].filter((u, i, arr) =>
+          arr.findIndex((v) => v.name === u.name) === i),
+      }
+      compiled.shaderRef = internShaderSource(compiled.vert, compiled.frag)
+    }
+    if (sceneShaderCache.size > 128) sceneShaderCache.clear()
+    sceneShaderCache.set(cacheKey, compiled)
+  }
+  if (compiled.error) return { error: compiled.error }
+
+  // sampler uniform 默认贴图解析（util/noise、util/clouds_256 等）：WE 语义 = 槽位无
+  // 显式绑定时用 uniform 元数据 default。_rt_* 帧缓冲与 _alias_* 由渲染端特判，跳过。
+  // ⚠️ 放在 MASK/TIMEOFFSET 推导之后（默认贴图不应触发 MASK=1——MASK 只认编辑器
+  // 画上去的 opacitymask 显式绑定）。
+  const baseTexList = textures && textures.length ? textures : fallbackTextures
+  const resolvedTexList = baseTexList ? baseTexList.slice() : []
+  // ⚠️ 仅当 shader 真引用 g_Texture0 才补 null 占位：flat/solid 等无贴图 pass 若被塞
+  // [null] 会变成 tex0Null → 渲染端按「链首 null」整对象跳过（虹夏 Sky 蓝天消失实证，
+  // 2026-10-23）。原行为空列表输出 []，客户端按 slotCount=1 + 无 sampler location 安全跳过。
+  if (resolvedTexList.length === 0 && compiled.uniforms.some((u) => u.type === 'sampler2D' && u.name === 'g_Texture0')) {
+    resolvedTexList.push(null)
+  }
+  for (const u of compiled.uniforms) {
+    if (u.type !== 'sampler2D' || typeof u.default !== 'string' || !u.default) continue
+    if (/^(_rt_|_alias_)/.test(u.default)) continue
+    const m = /^g_Texture(\d+)$/.exec(u.name || '')
+    if (!m) continue
+    const slot = Number(m[1])
+    if (slot === 0) continue
+    if (resolvedTexList[slot] != null) continue
+    const info = buildTextureInfo(assetSource, dir, u.default)
+    if (info) {
+      while (resolvedTexList.length <= slot) resolvedTexList.push(null)
+      resolvedTexList[slot] = info
+    }
+  }
+
+  // 常量绑定与贴图绑定（textures 条目可为已构建的 info 对象 → 原样透传，
+  // 供效果链挂载遮罩后按最终贴图重建 pass 时复用）。
+  // ⚠️ vert/frag 全文不进 manifest（字符串上限：太阳系 847 对象内联 500 实证）——
+  // 返回 shaderRef 引用，源码走 /scene/shaders 批量端点由渲染端水合。
+  return {
+    shaderName,
+    shaderRef: compiled.shaderRef,
+    uniforms: compiled.uniforms,
+    textures: resolvedTexList.map((name) =>
+      typeof name === 'object' && name !== null ? name : buildTextureInfo(assetSource, dir, name)),
+  }
+}
+
+// 材质 json（含 effect 的 material 引用）→ 渲染 pass 列表
+// userProperties：project.json general.properties（type=color 的用户配色，value = "r g b"）
+function collectMaterialPasses(assetSource, dir, materialPath, instanceConstants = {}, userProperties = null, instanceCombos = null) {
+  const material = assetSource.readJson(materialPath)
+  if (!material || !Array.isArray(material.passes)) return []
+  const out = []
+  for (const pass of material.passes) {
+    if (!pass || typeof pass.shader !== 'string') continue
+    // constantshadervalues 规范化：① {user,value}/{script,value} 绑定取 value
+    // （天空盒 alpha 绑定实测）；② 键名大小写回退——材质 json 常见「Color/Alpha」大写，
+    // 而 shader uniform 的 material 名是小写「color/alpha」（generic4 实测），精确匹配
+    // 会全部 miss → g_TintAlpha=0 整对象不可见（土星 3589454154 实测）。
+    const rawConstants = { ...(pass.constantshadervalues || {}), ...instanceConstants }
+    const constants = {}
+    for (const [k, v] of Object.entries(rawConstants)) {
+      const val = v && typeof v === 'object' ? v.value : v
+      constants[k] = val
+      if (k !== k.toLowerCase() && constants[k.toLowerCase()] === undefined) constants[k.toLowerCase()] = val
+    }
+    // usershadervalues：{ 属性名: uniform的material名 } —— WE 用户配色映射
+    // （如 eagleflag：material color2 ← 属性 flagcolor1 "1 1 1"）；注入为普通常量供渲染端绑定
+    if (userProperties && pass.usershadervalues && typeof pass.usershadervalues === 'object') {
+      for (const [propName, materialName] of Object.entries(pass.usershadervalues)) {
+        const prop = userProperties[propName]
+        if (prop && typeof prop.value === 'string' && typeof materialName === 'string') {
+          constants[materialName] = prop.value
+        }
+      }
+    }
+    const combos = { ...(pass.combos || {}), ...(instanceCombos || {}) }
+    const textures = Array.isArray(pass.textures) ? pass.textures : []
+    const info = buildShaderPass(assetSource, dir, pass.shader, combos, textures, textures)
+    if (info.error) {
+      out.push({ error: info.error })
+      continue
+    }
+    // passthrough：TRANSFORM combo 下用 MVP（普通 quad），否则直接输出 clip 全屏——
+    // 渲染端 clipQuadVao + FBO 链（2026-10-21）两种都能画。标记 passthrough 供调用方决策：
+    // 效果链 pass = blit 上一环输出（支持）；对象基础材质 pass（如 dino_run postprocess
+    // 的 fullscreenlayer）期望的输入是「整个已合成场景」而非单对象链 → 仍不支持。
+    const isPassthrough = /(^|\/)passthrough$/i.test(pass.shader)
+    out.push({
+      shaderName: pass.shader,
+      blending: pass.blending || 'normal',
+      depthTest: (pass.depthtest || 'disabled') === 'enabled',
+      depthWrite: (pass.depthwrite || 'disabled') === 'enabled',
+      constants,
+      combos,
+      textures: info.textures,
+      shaderRef: info.shaderRef,
+      uniforms: info.uniforms,
+      passthrough: isPassthrough || undefined,
+    })
+  }
+  return out
+}
+
+// 单个场景对象 → 渲染描述
+
+// ===== WE .mdl 二进制模型解析（v1 3D 模型支持）=====
+// 格式（逆向自 16 个官方工程逐一验证，与 linux-wallpaperengine 社区笔记交叉印证）：
+//   magic "MDLV00xx"(8B) + 3×u32 + null 结尾材质 json 路径 + …
+//   之后存在 [u32 vertexBytes][顶点数据][u32 indexBytes][uint16 索引] 的几何块。
+// 顶点 stride 因版本/是否带法线而异（官方工程两种都有）：
+//   20 = pos3 + uv2；32 = pos3 + normal3 + uv2（全 float 小端）。
+// 定位用特征扫描而非固定偏移：vb % stride === 0、顶点区为有限 float、
+// 索引 uint16 全部 < 顶点数、块尾正好是 indexBytes —— 四重约束保证唯一命中。
+// 多几何段模型（如 arsenal pistols 多材质分段）取顶点数最大的段作主几何。
+const mdlModelCache = new Map()
+
+function parseMdlModel(assetSource, dir, modelPath) {
+  const cacheKey = dir + '|' + modelPath
+  if (mdlModelCache.has(cacheKey)) return mdlModelCache.get(cacheKey)
+  let result = null
+  try {
+      const buf = assetSource.read(modelPath)
+      if (!buf || buf.length < 32 || buf.slice(0, 4).toString('latin1') !== 'MDLV') {
+        result = { error: 'mdl 魔数不符: ' + modelPath }
+      } else {
+        // 材质 json 路径（null 结尾）：头部第 20 字节是 null 前缀，路径文本从 21 开始。
+        // ⚠️ WE 写入的是 UTF-8：按 latin1 解会把中文路径变乱码 → readJson 全失败、
+        // mesh 对象 passes=[] 全黑（土星 3589454154 实测，仅纯 ASCII 路径的 s1 侥幸可用）
+        let strStart = 20
+        while (strStart < buf.length && buf[strStart] === 0) strStart++
+        const strEnd = buf.indexOf(0, strStart)
+        const materialPath = strEnd > strStart ? buf.slice(strStart, strEnd).toString('utf8') : ''
+      // [vbBytes][顶点数据][ibBytes][uint16 索引] 四元组验证（与客户端 modelMdl.ts tryQuadAt 对齐）
+      const tryQuadAt = (q) => {
+        const vb = buf.readUInt32LE(q)
+        // ⚠️ 上限 256MB：土星 陨石单体 vb=144MB（163MB 文件）实测，64MB 会误拒真块
+        if (vb < 20 || vb > 256 * 1024 * 1024 || q + 4 + vb + 6 > buf.length) return null
+        const indexBytes = buf.readUInt32LE(q + 4 + vb)
+        if (indexBytes < 6 || indexBytes % 2 !== 0 || indexBytes > 64 * 1024 * 1024 || q + 8 + vb + indexBytes > buf.length) return null
+        // 廉价闸门（全局回退扫描每个 offset 都会进来，必须先挡掉顶点/索引 float 数据里的
+        // junk 候选，否则全量索引扫描会把事件循环卡到分钟级——2026-10-24 manifest 500 卡死实测）：
+        // ① 首顶点位置须是合理 float；② vb 须能被至少一个候选 stride 整除；③ 真实网格
+        // indexBytes/vb ≈ 0.08~0.2（uint16 索引 ≈ 顶点数 2 倍），>8 倍必是 junk。
+        const p0 = buf.readFloatLE(q + 4)
+        if (!Number.isFinite(p0) || Math.abs(p0) > 1e5) return null
+        if (![64, 56, 52, 48, 44, 40, 36, 32, 28, 24, 20].some((s) => vb % s === 0)) return null
+        if (indexBytes > vb * 8) return null
+        const iStart = q + 8 + vb
+        // 索引宽度双重解释：先按 uint16（绝大多数模型），无 stride 候选通过再按 uint32
+        // （大网格 meteor 3589454154 实测 u32 索引 maxIndex+1 == vc(stride48) 完全吻合）
+        for (const index32 of [false, true]) {
+          if (index32 && indexBytes % 4 !== 0) return null
+          const step = index32 ? 4 : 2
+          let maxIndex = 0
+          for (let i = 0; i < indexBytes; i += step) {
+            const v = index32 ? buf.readUInt32LE(iStart + i) : buf.readUInt16LE(iStart + i)
+            if (v > maxIndex) maxIndex = v
+          }
+          for (const stride of [64, 56, 52, 48, 44, 40, 36, 32, 28, 24, 20]) {
+            if (vb % stride) continue
+            const vertexCount = vb / stride
+            if (vertexCount < 3 || vertexCount < maxIndex + 1) continue
+            if (vertexCount > (maxIndex + 1) * 1.25) continue // 超出引用数 25% 以上视为虚增
+            // 顶点区 float 合理性抽查（顶点对齐：只读每顶点的 pos3，避免跨字段拼接误报）
+            let floatsOk = true
+            for (let k = 0; k < 8 && floatsOk; k++) {
+              const vBase = q + 4 + ((k * 7919) % vertexCount) * stride
+              for (let c = 0; c < 12 && floatsOk; c += 4) {
+                const f = buf.readFloatLE(vBase + c)
+                if (!Number.isFinite(f) || Math.abs(f) > 1e5) floatsOk = false
+              }
+            }
+            if (!floatsOk) continue
+            if (stride >= 28) {
+              // normal@12 应近单位长度（错位布局比例骤降）
+              let unitGood = 0
+              const samples = Math.min(vertexCount, 400)
+              for (let i = 0; i < samples; i++) {
+                const vIndex = Math.floor((i * 7919) % vertexCount)
+                const b = q + 4 + vIndex * stride + 12
+                const x = buf.readFloatLE(b), y = buf.readFloatLE(b + 4), z = buf.readFloatLE(b + 8)
+                const len = Math.hypot(x, y, z)
+                if (len > 0.85 && len < 1.15) unitGood++
+              }
+              if (unitGood / samples < 0.9) continue
+            }
+            return { blockOffset: q, vertexBytes: vb, stride, vertexCount, indexBytes, index32 }
+          }
+        }
+        return null
+      }
+      let best = null
+      // 首选：材质串后的近程窗口扫描 —— 标准布局（body.mdl 等）为材质串 null 后
+      //   [pad u32=0][vbBytes][顶点数据][ibBytes][uint16 索引]，窗口首两格即命中；
+      // MDLV0023（土星 球体01 实测）在串与几何块之间还有 u32 meshCount + 6 float 包围盒
+      // + u32 标志的前导（~36B）→ 开 256B 窗口步进扫描，不要求紧邻。
+      // 全局特征扫描在这种文件上会误命中 float 数据里的假块（拼出碎片垃圾，fantasticcar 实际踩坑）。
+      {
+        const p = strEnd + 1
+        const windowEnd = Math.min(p + 256, buf.length - 16)
+        for (let q = p; q <= windowEnd; q += 4) {
+          const hit = tryQuadAt(q)
+          if (hit) { best = hit; break }
+        }
+      }
+      // 回退：全局四重特征扫描（pistols 等非标准布局仍靠它）。
+      // ⚠️ 只对中小文件启用：大文件逐 offset 全量索引扫描会卡事件循环到分钟级
+      // （meteor 163MB 418s 实测），而大网格是 MDLV0023 近程窗口可命中的标准布局。
+      if (!best && buf.length <= 64 * 1024 * 1024) {
+      // 步长 4：几何块字段都是 u32 对齐（MDLV0023 off=100 等实测），逐字节扫是 4 倍浪费
+      for (let off = 24; off < buf.length - 16; off += 4) {
+        const hit = tryQuadAt(off)
+        if (hit && (!best || hit.vertexCount > best.vertexCount)) best = hit
+      }
+      }
+      if (!best) {
+        result = { error: 'mdl 几何块定位失败: ' + modelPath, materialPath }
+      } else {
+        // ⚠️ 只回元数据，不解析/内联几何：土星 3589454154 陨石单体序列化 329MB、
+        // 实时太阳系 3662790108 847 对象合计 551MB（V8 字符串上限 → manifest 500）。
+        // 几何由渲染端拉 .mdl 二进制自解析（src/services/wallpaperEngineScene/modelMdl.ts，
+        // 与本函数的块定位逻辑逐行对齐）。
+        result = {
+          materialPath,
+          vertexCount: best.vertexCount,
+          stride: best.stride,
+          hasNormals: best.stride >= 28,
+          index32: best.index32,
+          indexCount: best.indexBytes / (best.index32 ? 4 : 2),
+        }
+      }
+    }
+  } catch (error) {
+    result = { error: 'mdl 解析异常: ' + error.message }
+  }
+  if (mdlModelCache.size > 512) mdlModelCache.clear()
+  mdlModelCache.set(cacheKey, result)
+  return result
+}
+
+/**
+ * WE 粒子系统解析（scene.json obj.particle → 前端 CPU 模拟 + instanced 渲染）。
+ * 内联粒子系统 JSON（pkg 内可读）；children 只展开一层（孙层忽略）。
+ * 材质取 passes[0]：blending（additive/translucent）+ textures[0]（走 /scene/asset 通道，
+ * spritesheet 的 cols/rows 已在 buildTextureInfo 由 .tex 头部派生）。
+ */
+function parseParticleSystem(assetSource, dir, ref, depth = 0) {
+  try {
+    const ps = assetSource.readJson(ref)
+    if (!ps || typeof ps !== 'object') return null
+    const unsupported = []
+    let blending = 'translucent'
+    let texture = null
+    if (typeof ps.material === 'string') {
+      const material = assetSource.readJson(ps.material)
+      const firstPass = Array.isArray(material?.passes) ? material.passes[0] : null
+      if (firstPass) {
+        blending = typeof firstPass.blending === 'string' ? firstPass.blending : 'translucent'
+        const textureRef = Array.isArray(firstPass.textures) ? firstPass.textures[0] : null
+        if (typeof textureRef === 'string') {
+          texture = buildTextureInfo(assetSource, dir, textureRef)
+          if (!texture) unsupported.push('particle:texture')
+        } else {
+          unsupported.push('particle:texture')
+        }
+      } else {
+        unsupported.push('particle:material')
+      }
+    } else {
+      unsupported.push('particle:material')
+    }
+    const children = []
+    if (depth === 0 && Array.isArray(ps.children)) {
+      for (const child of ps.children) {
+        if (child && typeof child.name === 'string' && children.length < 4) {
+          const parsedChild = parseParticleSystem(assetSource, dir, child.name, depth + 1)
+          if (parsedChild) children.push(parsedChild)
+        }
+      }
+    }
+    // 未知算子不打断：渲染端按名字分发，不认识的自动忽略（此处仅记录便于排查覆盖率）
+    for (const op of ps.operator || []) {
+      if (!['movement', 'alphafade', 'sizechange', 'oscillatealpha', 'oscillateposition', 'angularmovement', 'alphachange', 'colorchange', 'oscillatesize', 'turbulence', 'vortex'].includes(op?.name)) {
+        unsupported.push('particle:op:' + String(op?.name || '?'))
+      }
+    }
+    const rendererNames = (ps.renderer || []).map((r) => String(r?.name || ''))
+    if (rendererNames.some((name) => name === 'rope' || name === 'ropetrail')) {
+      // 拖尾/绳渲染器 v1 降级为 sprite（矩形贴图能看，形状语义丢失）
+      unsupported.push('particle:trail-renderer')
+    }
+    const override = obj => obj && typeof obj === 'object' ? obj : null
+    const origin = parseVec3(ps.emitter?.[0]?.origin)
+    return {
+      file: ref,
+      blending,
+      texture,
+      unsupported,
+      children,
+      // emitter/initializer/operator 原样下发（前端按 name 分发；JSON 很小）
+      emitter: (ps.emitter || []).map(override),
+      initializer: (ps.initializer || []).map(override),
+      operator: (ps.operator || []).map(override),
+      renderer: (ps.renderer || []).map(override),
+      maxcount: Math.min(Math.max(Number(ps.maxcount) || 100, 1), 4096),
+      starttime: Number(ps.starttime) || 0,
+      animationmode: ps.animationmode === 'sequence' || ps.animationmode === 'randomframe' ? ps.animationmode : null,
+      sequencemultiplier: Number(ps.sequencemultiplier) || 1,
+      emitterOrigin: origin,
+    }
+  } catch {
+    return null
+  }
+}
+
+// WE 对象级 alpha 存在两套约定：雪境 312 用 0–1（0.37），Girl and Samurai 的水层用
+// 0–255（水1=222、水2=111）。GLSL 端 clamp 会把 >1 直接变 1 → 水层全不透明盖屏成
+// 过曝涂抹（2026-10-29 实证）。启发式：>1 视为 0–255 约定除以 255。
+function normalizeWeAlpha(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 1
+  return v > 1 ? Math.min(v / 255, 1) : Math.max(v, 0)
+}
+
+function buildSceneObject(assetSource, dir, obj, userProperties = null, ortho = null) {
+  const unsupported = []
+  const entry = {
+    id: obj.id,
+    name: obj.name || String(obj.id || ''),
+    origin: parseVec3(obj.origin),
+    angles: parseVec3(obj.angles),
+    scale: parseVec3(obj.scale, [1, 1, 1]),
+    pivot: parseVec2(obj.pivot, [0.5, 0.5]),
+    size: [0, 0],
+    // visible 可能是布尔，也可能是 {user, value} 用户属性绑定 → 属性优先、编辑器
+    // 快照 value 仅作静态回退（value 是作者保存时的编辑器状态，与 project.json 属性
+    // 默认值不一致时以属性为准——Girl and Samurai 3618986965 实证：background combo
+    // 默认 1=武士白天（preview 同款），但 value 快照停在背景 2（雨夜女孩）→ 只信 value
+    // 会渲染出两套背景混合的错乱画面）。
+    // user 两种形态：字符串=布尔属性名（"watercyclegirl"）；
+    // {condition:"1", name:"background"}=combo 属性值匹配（String 比较兼容数值）。
+    visible: (() => {
+      if (obj.visible == null) return true
+      if (typeof obj.visible !== 'object') return obj.visible !== false
+      const user = obj.visible.user
+      if (userProperties && user != null) {
+        if (typeof user === 'string') {
+          const p = userProperties[user]
+          if (p && p.value !== undefined) return !!p.value
+        } else if (typeof user === 'object' && typeof user.name === 'string') {
+          const p = userProperties[user.name]
+          if (p && p.value !== undefined) return String(p.value) === String(user.condition)
+        }
+      }
+      return obj.visible.value !== false
+    })(),
+    passes: [],
+    unsupported,
+    // 对象级 alpha / 混合模式（scene.json obj.alpha / obj.colorBlendMode）：
+    // 312（雪境暗角）alpha=0.37 + colorBlendMode=12（SoftLight，引擎 ApplyBlending 枚举）。
+    // colorBlendMode>0 → 基础材质 pass 注入 BLENDMODE combo（genericimage 的 #if BLENDMODE
+    // 块在 shader 内做 ApplyBlending，A=g_Texture4 背景快照）+ 渲染端绑快照 + alpha 乘 g_Color4。
+    alpha: normalizeWeAlpha(obj.alpha),
+    colorBlendMode: typeof obj.colorBlendMode === 'number' && obj.colorBlendMode > 0
+      ? Math.round(obj.colorBlendMode)
+      : 0,
+    // WE 视差层（camera eye 是视差相机，非 lookAt）：depth 0（缺省）=贴屏幕不动，
+    // 1=贴世界（渲染端 offset = -eye*depth）。虹夏主体全部缺省 → eye(-496,-328) 只动
+    // 三个 lense 光斑；此前 lookAt 全局应用 eye → 全场景平移成「巨大特写」（2026-10-23）。
+    parallaxDepth: parseVec2(obj.parallaxdepth ?? obj.parallaxDepth, [0, 0]),
+  }
+
+  // 粒子系统：obj.particle / obj.particles 是粒子系统 JSON 的文件引用（pkg 内）。
+  // 内联下发供渲染端 CPU 模拟 + instanced 渲染（2026-10-23 起不再是 unsupported 黑洞——
+  // 本机 10 个 scene 工坊壁纸全部含粒子对象）
+  const particleRef = typeof obj.particle === 'string'
+    ? obj.particle
+    : (typeof obj.particles === 'string' ? obj.particles : null)
+  if (particleRef) {
+    const parsed = parseParticleSystem(assetSource, dir, particleRef)
+    if (parsed) {
+      entry.type = 'particle'
+      entry.particle = parsed
+      // instanceoverride：作者对实例的缩放（alpha 透明度 / count 数量比 / rate 生成率比 / size 尺寸比）
+      const ov = obj.instanceoverride
+      if (ov && typeof ov === 'object') {
+        entry.particle.instanceoverride = {
+          alpha: typeof ov.alpha === 'number' ? ov.alpha : 1,
+          count: typeof ov.count === 'number' ? ov.count : 1,
+          rate: typeof ov.rate === 'number' ? ov.rate : 1,
+          size: typeof ov.size === 'number' ? ov.size : 1,
+        }
+      }
+      // 粒子尺寸基准：scene.json 的 obj.size 优先（与 puppet 同约定），缺省 64
+      const sizeParts = String(obj.size ?? '').trim().split(/\s+/).map(Number)
+      if (sizeParts.length >= 2 && sizeParts.every(Number.isFinite) && sizeParts[0] > 0 && sizeParts[1] > 0) {
+        entry.size = [sizeParts[0], sizeParts[1]]
+      }
+      for (const flag of parsed.unsupported) unsupported.push(flag)
+      return entry
+    }
+    unsupported.push('particle:parse')
+  }
+  if (obj.sound) unsupported.push('sound')
+  if (obj.light) {
+    unsupported.push('light')
+    // 光源参数保留供渲染端真实光照（generic/core 等的 g_LightsPosition 体系，2026-10-21）：
+    // WE scene.json 光对象：light=point、color、intensity、radius、origin
+    entry.light = {
+      kind: String(obj.light),
+      color: parseVec3(obj.color, [1, 1, 1]),
+      intensity: typeof obj.intensity === 'number' ? obj.intensity : 1,
+      radius: typeof obj.radius === 'number' ? obj.radius : 10,
+      origin: parseVec3(obj.origin),
+    }
+  }
+
+  // 模型引用：常规对象用 image，部分工程用 model 字段（neon_sunset 的太阳/网格等）
+  const modelRef = typeof obj.image === 'string'
+    ? obj.image
+    : (typeof obj.model === 'string' ? obj.model : null)
+  // .mdl = 编译后的 3D 网格模型（techno/dna_fragment/fantasticcar/arsenal/demon_core 等）：
+  // 几何从 mdl 二进制提取，材质 json 路径内嵌在 mdl 头部 → 走同一套材质 pass 管线。
+  // 渲染端按 entry.mesh 走透视相机 mesh 管线（区别于 2D 正交 quad）。
+  if (modelRef && /\.mdl$/i.test(modelRef)) {
+    const parsed = parseMdlModel(assetSource, dir, modelRef)
+    if (parsed.error || !parsed.vertexCount) {
+      unsupported.push(parsed.error || 'model:mesh-empty')
+      return entry
+    }
+    // 几何不内联（太阳系 847 对象 551MB 超 V8 字符串上限 500 实证）——只给 .mdl 引用，
+    // 渲染端经 /scene/asset 端点拉二进制自解析（modelMdl.ts）
+    entry.type = 'model'
+    entry.model = { file: modelRef }
+    if (parsed.materialPath) {
+      entry.passes.push(...collectMaterialPasses(assetSource, dir, parsed.materialPath, {}, userProperties,
+        entry.colorBlendMode > 0 ? { BLENDMODE: entry.colorBlendMode } : null))
+    } else {
+      unsupported.push('model:material')
+    }
+    return entry
+  }
+  const model = modelRef ? assetSource.readJson(modelRef) : null
+  if (!model) {
+    // 无 image/model 字段 ≠ 缺内容（千咲 95、伊蕾娜 91 个「model」误标实测）：
+    // ① 有 text 字段 → WE 文本对象（渲染端 canvas 光栅化 + FontFace 加载 pkg 内 .ttf/.otf）
+    // ② 纯变换容器（常见 parent 骨架节点，千咲 25 个）→ 正常保留变换，不标注
+    // ③ 有 image/model 引用但读取失败 → 真 model 缺失
+    if (obj.text != null && !modelRef) {
+      // text/color/pointsize 可能是 {user,value} 绑定或 {script,value}（时钟 12:34 静态取 value）
+      const pick = (v, dflt) => v == null ? dflt : (typeof v === 'object' ? v.value : v)
+      const textVal = String(pick(obj.text, ''))
+      const colorVal = String(pick(obj.color, '1 1 1'))
+      entry.type = 'text'
+      entry.text = {
+        text: textVal,
+        font: typeof obj.font === 'string' ? obj.font : '',
+        pointsize: Number(pick(obj.pointsize, 64)) || 64,
+        color: parseVec3(colorVal, [1, 1, 1]),
+        alpha: normalizeWeAlpha(Number(pick(obj.alpha, 1)) || 1),
+        alignH: String(obj.horizontalalign || 'center'),
+        alignV: String(obj.verticalalign || 'center'),
+        padding: Number(obj.padding) || 0,
+      }
+      // 文本层 size = 编辑器测量的文本包围盒（scene.json 实存，如 Clock 1956×1019）；
+      // 渲染端 canvas 光栅化用它定画布尺寸，quad 按它摆放。缺失时渲染端按文本自测。
+      const textSizeParts = String(obj.size ?? '').trim().split(/\s+/).map(Number)
+      if (textSizeParts.length >= 2 && textSizeParts.every(Number.isFinite) && textSizeParts[0] > 0 && textSizeParts[1] > 0) {
+        entry.size = [textSizeParts[0], textSizeParts[1]]
+      }
+      return entry
+    }
+    if (modelRef) unsupported.push('model')
+    return entry
+  }
+  // WE puppet warp（剪纸骨骼动画）：models/*.json 的 puppet 字段指向 .mdl
+  // （网格 + 骨骼 + 动画 clips 二进制）。材质照常收（图集贴图）；mdl 字节由渲染端
+  // 经 asset 端点拉取后自行解析（布局探测 + MDLS/MDLA 块），前端 CPU 蒙皮。
+  if (typeof model.puppet === 'string') {
+    entry.type = 'puppet'
+    entry.puppet = {
+      url: '/api/wallpaper-engine/scene/asset',
+      file: model.puppet,
+      // scene.json 的 animationlayers（clip id 引用 mdl 内动画；additive 多层叠加）
+      animationLayers: Array.isArray(obj.animationlayers)
+        ? obj.animationlayers
+            .filter((l) => l && typeof l.animation === 'number' && l.visible !== false)
+            .map((l) => ({
+              id: l.id ?? 0,
+              animation: l.animation,
+              blend: typeof l.blend === 'number' ? l.blend : 1,
+              rate: typeof l.rate === 'number' ? l.rate : 1,
+              additive: l.additive === true,
+              visible: l.visible !== false,
+            }))
+        : [],
+    }
+    // puppet 显示尺寸：scene.json obj.size（编辑器设定）优先，缺失时前端用 mdl 顶点包围盒。
+    // （scene.json 的 obj.size 此前从未被读取；mdl 顶点坐标即编辑器 size 空间像素）
+    const sizeParts = String(obj.size ?? '').trim().split(/\s+/).map(Number)
+    if (sizeParts.length >= 2 && sizeParts.every(Number.isFinite) && sizeParts[0] > 0 && sizeParts[1] > 0) {
+      entry.size = [sizeParts[0], sizeParts[1]]
+    }
+  }
+  // solidlayer（WE 天空占位层，Sky placeholder）：无 size 字段时引擎按正交盒全屏渲染纯色。
+  // ⚠️ 仅在 scene.json 对象无显式 size 时才全屏兜底——雪境 3669680904 的两个「纯色」是
+  // 256×256 小方块（obj.size 显式），强拍全屏 = 两层不透明黑罩盖住整个场景（2026-10-22）。
+  // ⚠️ size 在 scene.json 的 obj 上，不在 model.json（solidlayer.json 只有 material/solidlayer）。
+  if (model.solidlayer === true) {
+    entry.solidlayer = true
+    const sizeParts = String(obj.size ?? '').trim().split(/\s+/).map(Number)
+    const hasExplicitSize = sizeParts.length >= 2 && sizeParts.every(Number.isFinite) && sizeParts[0] > 0 && sizeParts[1] > 0
+    if (!hasExplicitSize) {
+      const ow = Number(ortho && ortho.width) || 1920
+      const oh = Number(ortho && ortho.height) || 1080
+      entry.size = [ow, oh]
+      entry.origin = [ow / 2, oh / 2, 0]
+      entry.scale = [1, 1, 1]
+    }
+  }
+  const explicitW = Number(model.width) || 0
+  const explicitH = Number(model.height) || 0
+
+  // 材质可能挂在 model 顶层或 layers[] 各层
+  const materialPaths = []
+  if (typeof model.material === 'string') materialPaths.push(model.material)
+  if (Array.isArray(model.layers)) {
+    for (const layer of model.layers) {
+      if (layer && typeof layer.material === 'string') materialPaths.push(layer.material)
+      else unsupported.push('layer')
+    }
+  }
+  for (const materialPath of materialPaths) {
+    // 基础材质里的 passthrough 期望「整个已合成场景」作输入（单对象 FBO 链给不了）→ 跳过
+    const basePasses = collectMaterialPasses(assetSource, dir, materialPath, {}, userProperties,
+      entry.colorBlendMode > 0 ? { BLENDMODE: entry.colorBlendMode } : null)
+    const kept = basePasses.filter((p) => !p.passthrough)
+    if (kept.length !== basePasses.length) unsupported.push('passthrough')
+    entry.passes.push(...kept)
+  }
+  // solidlayer 纯色（flat shader 的 g_Color/g_Alpha 无 material 注释 → 常量直接按 uniform 名挂，
+  // 渲染端 setConstantUniforms 有同名兜底）。color 有两种形态：字符串（铃芽 3687818927 的
+  // 「纯色」"0 1 1"）或 {value:"..."}（虹夏 3650475846 的 Sky）→ 都要认；alpha 取对象 alpha
+  // （纯色层 0.15，写死 1 会变不透明白罩盖住全场景——2026-10-21 铃芽实测）
+  if (entry.solidlayer && entry.passes.length > 0) {
+    const flatPass = entry.passes[0]
+    if (!flatPass.constants) flatPass.constants = {}
+    const objColor = typeof obj.color === 'string'
+      ? obj.color
+      : (obj.color && typeof obj.color.value === 'string' ? obj.color.value : '1 1 1')
+    flatPass.constants.g_Color = objColor
+    flatPass.constants.g_Alpha = normalizeWeAlpha(obj.alpha)
+  }
+  // 显式尺寸优先；autosize 模型（如 dino_run，model json 只有 autosize:true 无宽高）回退材质纹理尺寸。
+  // puppet 对象例外：正确尺寸 = mdl 顶点包围盒（前端解析后自定），图集尺寸当 size 会把
+  // 2080×2080 图集整张铺满（v1「碎条」根因之一）
+  if (explicitW && explicitH) {
+    entry.size = [explicitW, explicitH]
+  } else if (entry.type !== 'puppet') {
+    const baseTex = entry.passes.find((p) => !p.error && p.textures?.[0]?.width)
+    if (baseTex) {
+      entry.size = [baseTex.textures[0].width, baseTex.textures[0].height]
+    } else if (entry.passes.some((p) => !p.error)) {
+      // 无贴图 quad（纯色/flat，如虹夏 Sky placeholder）：WE 编辑器基准 512×512 ×对象 scale。
+      // 该对象 scale=[18,8] → 9216×4096 盖满天空；按 256 算只有 4608×2048 顶部盖不满
+      // （原版天空全蓝实证）。渲染端 size=0 会整对象隐形 → 灰天（背景灰占位图裸露）。
+      entry.size = [512, 512]
+    }
+  }
+
+  // composelayer（WE 组合层）：材质 = models/util/composelayer.json → shader 采样
+  // g_Texture0 = "_rt_FullFrameBuffer"（全帧缓冲直通，屏幕坐标采样）。单对象管线给不出
+  // 场景合成结果 → 此前整对象 visible=false（采样落空画出不透明色块盖后续对象）。
+  // 现打标 composeLayer 交渲染端做「帧缓冲快照直通」：绘制到该对象时把当前帧缓冲
+  // copyTexImage2D 成纹理绑 tex0（2026-10-22 #16）。
+  if (entry.passes.some((p) => /composelayer/i.test(p.shaderName || ''))) {
+    entry.composeLayer = true
+  }
+
+  // 效果链：effect.json 定义额外 pass（scroll 用顶点着色器做 UV 滚动、waterwaves 扭曲、
+  // blurprecise 两 pass 高斯等）。多 pass 效果链（2026-10-21 起支持）：渲染端 FBO ping-pong
+  // 链提供「上一 pass 输出」；effect 内的 target/bind 命名渲染目标（_rt_*）以线性链近似。
+  if (Array.isArray(obj.effects)) {
+    for (const effect of obj.effects) {
+      if (!effect || effect.visible === false) continue
+      if (typeof effect.file !== 'string') { unsupported.push('effect'); continue }
+      const effectDef = assetSource.readJson(effect.file)
+      if (!effectDef || !Array.isArray(effectDef.passes)) { unsupported.push('effect'); continue }
+      for (let pi = 0; pi < effectDef.passes.length; pi++) {
+        const instancePass = effectDef.passes[pi]
+        // scene.json 实例的 passes[] 与 effect.json 的 passes[] 按序对应：
+        // constantshadervalues/combos/textures 挂在场景实例侧（tint 的 {alpha,color}、
+        // blurprecise 的 {scale, ENABLEMASK, VERTICAL} 实测），effect.json 侧的取默认；
+        // 两侧合并、实例优先。
+        const scenePass = Array.isArray(effect.passes) ? effect.passes[pi] : null
+        const instanceConstants = {
+          ...(instancePass?.constantshadervalues || {}),
+          ...((scenePass && scenePass.constantshadervalues) || {}),
+        }
+        const instanceCombos = {
+          ...((instancePass && instancePass.combos) || {}),
+          ...((scenePass && scenePass.combos) || {}),
+        }
+        if (typeof instancePass?.material === 'string') {
+          const effectPasses = collectMaterialPasses(assetSource, dir, instancePass.material, instanceConstants, userProperties, instanceCombos)
+          if (effectPasses.length === 0) unsupported.push('effect:' + effect.file)
+          // 场景实例 textures 覆盖：null 槽 = 保留（framebuffer 输入），非 null = 实例贴图
+          // （tint 的 [null, tint_mask] 把 mask 挂到槽 1，2026-10-21 3650475846 Sky Refraction 实测）
+          const instanceTextures = Array.isArray(scenePass?.textures)
+            ? scenePass.textures
+            : (Array.isArray(instancePass.textures) ? instancePass.textures : null)
+          for (const pass of effectPasses) {
+            if (pass.error) continue
+            // WE 语义：效果 pass 的 g_Texture0 = 上一 pass 输出（framebuffer）。
+            // 材质未指定首槽贴图时置 null → 渲染端 FBO 链绑定链输出（不再回退对象基础贴图——
+            // 基础贴图已是链首 pass 的输入，中间 pass 应读链）
+            if (!pass.textures || pass.textures.length === 0 || !pass.textures[0]) {
+              pass.textures = [null, ...(pass.textures || []).slice(1)]
+            }
+            if (instanceTextures) {
+              if (!pass.textures) pass.textures = []
+              for (let ti = 0; ti < instanceTextures.length; ti++) {
+                if (instanceTextures[ti]) pass.textures[ti] = buildTextureInfo(assetSource, dir, instanceTextures[ti])
+              }
+            }
+            // 贴图槽驱动 combo（元数据声明 combo 的 sampler，见 buildShaderPass）在转译时
+            // 未知（遮罩此刻才挂载）→ 挂载后若任一非输入槽（≥1）非空且 combos 未显式指定
+            // → 用最终贴图重建 pass（waterwaves 遮罩在槽1/2、tint 槽1、depthparallax 深度图
+            // 槽1——后者的槽1绑定本身不触发 combo，但重建会用元数据正确判定 MASK 只认槽2）
+            if (pass.textures && pass.textures.some((t, ti) => ti > 0 && t != null)) {
+              const rebuilt = buildShaderPass(assetSource, dir, pass.shaderName, pass.combos || {}, pass.textures, pass.textures)
+              if (!rebuilt.error) {
+                pass.shaderRef = rebuilt.shaderRef
+                pass.uniforms = rebuilt.uniforms
+                pass.textures = rebuilt.textures
+              }
+            }
+          }
+          entry.passes.push(...effectPasses)
+        } else if (instancePass?.constantshadervalues && entry.passes.length > 0) {
+          // 效果实例直接给基础材质追加常量（无独立材质）
+          Object.assign(entry.passes[0].constants, instanceConstants)
+        } else {
+          unsupported.push('effect')
+        }
+      }
+    }
+  }
+
+  // solidlayer + 对象级效果链：flat 纯色 pass 只是效果链的初始输入，WE 最终呈现的是链输出。
+  // 若链里有编译不过的着色器（渲染端会跳过该 pass），把不透明纯色当结果画出来 = 「白色斜条」
+  // （鸣潮 3615984066 置于图层前/后 实测：audio-ring 效果链损坏 → 白 quad 绕中心转）。
+  // → 有对象级效果链时丢弃 flat 基底：链正常画链，链挂了对象整体不可见（比白条正确）。
+  if (entry.solidlayer
+    && Array.isArray(obj.effects) && obj.effects.length > 0
+    && entry.passes.length > 1) {
+    const kept = entry.passes.filter((p) => p.shaderName !== 'flat')
+    if (kept.length !== entry.passes.length) {
+      entry.passes = kept
+      unsupported.push('solidlayer-base-dropped')
+    }
+  }
+
+  return entry
+}
+
+// 场景清单构建（含缓存，键 = dir + project.json mtime）
+const sceneManifestCache = new Map()
+
+// parent 变换链（千咲 122/140、伊蕾娜 110/127 对象带 parent 实测）：WE 对象的
+// origin/angles/scale 相对父对象，世界变换 = 父世界矩阵 × 本地 T(origin)×R(ZYX)×S(scale)。
+// 结果写 entry.worldMatrix（列主序 4x4），渲染端直接 model = worldMatrix × S(size)。
+// disablepropagation = 该对象不向子对象传播变换（WE 编辑器开关）→ 子对象按根处理。
+function applyParentWorldTransforms(entries, rawObjects) {
+  const rawById = new Map()
+  for (const o of rawObjects) if (o && o.id != null) rawById.set(o.id, o)
+  const entryById = new Map(entries.map((e) => [e.id, e]))
+  const worldCache = new Map()
+
+  const deg = Math.PI / 180
+  const localMatrix = (origin, scale, angles) => {
+    const ax = (angles[0] || 0) * deg, ay = (angles[1] || 0) * deg, az = (angles[2] || 0) * deg
+    const cx = Math.cos(ax), sx = Math.sin(ax)
+    const cy = Math.cos(ay), sy = Math.sin(ay)
+    const cz = Math.cos(az), sz = Math.sin(az)
+    // R = Rz * Ry * Rx（列主序）
+    const r00 = cz * cy, r01 = cz * sy * sx - sz * cx, r02 = cz * sy * cx + sz * sx
+    const r10 = sz * cy, r11 = sz * sy * sx + cz * cx, r12 = sz * sy * cx - cz * sx
+    const r20 = -sy, r21 = cy * sx, r22 = cy * cx
+    const sxv = scale[0] || 1, syv = scale[1] || 1, szv = scale[2] || 1
+    return [
+      r00 * sxv, r10 * sxv, r20 * sxv, 0,
+      r01 * syv, r11 * syv, r21 * syv, 0,
+      r02 * szv, r12 * szv, r22 * szv, 0,
+      origin[0], origin[1], origin[2], 1,
+    ]
+  }
+  const mul = (a, b) => {
+    const out = new Array(16)
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3]
+      }
+    }
+    return out
+  }
+
+  const worldOfId = (id, depth) => {
+    if (worldCache.has(id)) return worldCache.get(id)
+    if (depth > 32) return null // 环防御
+    const entry = entryById.get(id)
+    const raw = rawById.get(id)
+    if (!entry && !raw) return null
+    const origin = entry ? entry.origin : parseVec3(raw.origin)
+    const scale = entry ? entry.scale : parseVec3(raw.scale, [1, 1, 1])
+    const angles = entry ? entry.angles : parseVec3(raw.angles)
+    let world = localMatrix(origin, scale, angles)
+    const parentId = raw && raw.parent != null ? raw.parent : null
+    // disablepropagation：自身变换正常，但不向子对象传播 → 子对象以此为根
+    const propagate = !(raw && raw.disablepropagation === true)
+    if (parentId != null && propagate) {
+      const parentWorld = worldOfId(parentId, depth + 1)
+      if (parentWorld) world = mul(parentWorld, world)
+    }
+    worldCache.set(id, world)
+    return world
+  }
+
+  for (const entry of entries) {
+    const world = worldOfId(entry.id, 0)
+    if (world) entry.worldMatrix = world
+  }
+  return entries
+}
+
+async function buildSceneManifest(dir, propOverrides = null) {
+  let projectMtime = 0
+  try { projectMtime = statSync(join(dir, 'project.json')).mtimeMs } catch { /* 忽略 */ }
+  const cacheKey = dir + '|' + projectMtime + (propOverrides ? '|' + JSON.stringify(propOverrides) : '')
+  if (sceneManifestCache.has(cacheKey)) return sceneManifestCache.get(cacheKey)
+
+  const engineAssetsDir = await getWallpaperEngineAssetsDir()
+  const assetSource = new WallpaperEngineAssetSource(dir, engineAssetsDir)
+  const project = assetSource.readJson('project.json')
+  if (!project || typeof project.file !== 'string') {
+    throw new Error('project.json 缺失或无 file 字段')
+  }
+
+  const scene = assetSource.readJson(project.file)
+  if (!scene || !Array.isArray(scene.objects)) {
+    throw new Error('scene.json 缺失或无 objects')
+  }
+
+  const general = scene.general || {}
+  const ortho = general.orthogonalprojection || {}
+  // WE 用户配色属性（type=color，value = "r g b"）：供材质 usershadervalues 映射到 uniform
+  const projectUserProperties = project.general?.properties || {}
+  // 调试覆盖（?prop.<name>=<value>）：直接改属性 value，供验证背景切换等组合
+  if (propOverrides) {
+    for (const [name, value] of Object.entries(propOverrides)) {
+      const base = projectUserProperties[name]
+      if (base && typeof base === 'object') projectUserProperties[name] = { ...base, value }
+      else projectUserProperties[name] = { value }
+    }
+  }
+  const manifest = {
+    title: project.title || '',
+    scene: {
+      camera: {
+        eye: parseVec3(scene.camera?.eye),
+        center: parseVec3(scene.camera?.center, [0, 0, -1]),
+        up: parseVec3(scene.camera?.up, [0, 1, 0]),
+      },
+      ortho: {
+        width: Number(ortho.width) || 1920,
+        height: Number(ortho.height) || 1080,
+      },
+      // 3D 模型对象用的透视相机 fov（度）。WE 引擎缺省值未公开，
+      // 60° 为对拍起点（techno 官方效果比对后可按场景微调）。
+      perspectiveFov: 60,
+      clearColor: parseVec3(general.clearcolor, [0, 0, 0]),
+      bloom: Boolean(general.bloom),
+      // 场景光照环境（generic/core 等模型 shader 的 g_LightAmbientColor/g_LightSkylightColor）
+      ambientColor: parseVec3(general.ambientcolor, [0.3, 0.3, 0.3]),
+      skylightColor: parseVec3(general.skylightcolor, [0.3, 0.3, 0.3]),
+    },
+    objects: applyParentWorldTransforms(scene.objects
+      .filter((obj) => obj && typeof obj === 'object')
+      // 粒子对象不再过滤（2026-10-23）：内联解析后走渲染端 CPU 模拟管线
+      .map((obj) => buildSceneObject(assetSource, dir, obj, projectUserProperties, ortho)), scene.objects),
+    unsupportedSummary: [],
+  }
+  for (const obj of manifest.objects) {
+    for (const flag of obj.unsupported || []) {
+      if (!manifest.unsupportedSummary.includes(flag)) manifest.unsupportedSummary.push(flag)
+    }
+  }
+
+  if (sceneManifestCache.size > 8) sceneManifestCache.clear()
+  sceneManifestCache.set(cacheKey, manifest)
+  return manifest
+}
+
+// 场景清单：渲染端一次拉取全部（场景图 + 转译后 GLSL + 纹理元数据）
+// nullchain 安全场景白名单（逐场景 ?nullchain=1 全场景截图实证后手工登记）：
+// 场景内全部「链首 tex0=null 多 pass 对象」放行后无伪影才可入表。
+// - 3618986965 Girl and Samurai：唯一链首 null 对象 = godrays(516)，2026-10-31 v54
+//   实证放行后光柱纯加光、全 band 正差、其余对象零变化。
+// - 雪境 3669680904 不入表：425 Album Shadow / 437 Albuim Art / 538 景深链放行后
+//   全屏灰雾（对象级链首 null 被强制全屏几何 / coc mask 全白最大模糊）。
+// 新场景入表前必须：?nullchain=1 全场景截图 + 同刻 A/B 对比无回归。
+const NULLCHAIN_SAFE_SCENES = new Set(['3618986965'])
+
+app.get('/api/wallpaper-engine/scene/manifest', async (req, res) => {
+  try {
+    const { id } = req.query
+    if (!id) return res.status(400).json({ success: false, message: '缺少 id' })
+    const dir = await resolveWallpaperEngineSceneDir(id)
+    if (!dir) return res.status(404).json({ success: false, message: '壁纸目录未找到' })
+    // 调试属性覆盖：?prop.background=2 → 覆盖 project.json 用户属性默认值
+    // （验证「2 Backgrounds」类壁纸的背景切换组合）
+    const propOverrides = {}
+    for (const [k, v] of Object.entries(req.query)) {
+      if (k.startsWith('prop.') && typeof v === 'string') propOverrides[k.slice(5)] = v
+    }
+    const manifest = await buildSceneManifest(dir, Object.keys(propOverrides).length ? propOverrides : null)
+    res.json({ success: true, id: String(id), path: dir, nullChainSafe: NULLCHAIN_SAFE_SCENES.has(String(id)), ...manifest })
+  } catch (error) {
+    console.error('[WEScene] 场景清单构建失败:', error)
+    res.status(500).json({ success: false, message: error.message })
+  }
+})
+
+// 场景着色器源码批量下发：manifest 的 pass 带 shaderRef 引用（全文不再内联——
+// 太阳系 847 对象内联超 V8 字符串上限 500 实证）。渲染端拉到 manifest 后取此端点水合。
+app.get('/api/wallpaper-engine/scene/shaders', async (req, res) => {
+  try {
+    const { id } = req.query
+    if (!id) return res.status(400).json({ success: false, message: '缺少 id' })
+    const dir = await resolveWallpaperEngineSceneDir(id)
+    if (!dir) return res.status(404).json({ success: false, message: '壁纸目录未找到' })
+    const manifest = await buildSceneManifest(dir)
+    const shaders = {}
+    let missing = 0
+    for (const obj of manifest.objects) {
+      for (const pass of obj.passes || []) {
+        const ref = pass && pass.shaderRef
+        if (!ref || shaders[ref]) continue
+        const src = sceneShaderSourceStore.get(ref)
+        if (src) shaders[ref] = src
+        else missing++
+      }
+    }
+    res.json({ success: true, id: String(id), shaders, missing })
+  } catch (error) {
+    console.error('[WEScene] 场景着色器下发失败:', error)
+    res.status(500).json({ success: false, message: error.message })
+  }
+})
+
+// 场景资产：.tex 返回 mip0（LZ4 已解压）+ X-Wf-Tex-* 元数据头；PNG/JPEG 内嵌图原样返回
+app.get('/api/wallpaper-engine/scene/asset', async (req, res) => {
+  try {
+    const { id, name } = req.query
+    if (!id || !name) return res.status(400).send('缺少参数')
+    if (/[\\/]|\.\./.test(String(name)) === false && !/^[a-zA-Z0-9_\-./]+$/.test(String(name))) {
+      return res.status(400).send('非法资产名')
+    }
+    const dir = await resolveWallpaperEngineSceneDir(id)
+    if (!dir) return res.status(404).send('壁纸目录未找到')
+    const engineAssetsDir = await getWallpaperEngineAssetsDir()
+    const assetSource = new WallpaperEngineAssetSource(dir, engineAssetsDir)
+    const buffer = assetSource.read(String(name))
+    if (!buffer) return res.status(404).send('资产未找到')
+
+    if (/\.tex$/i.test(String(name))) {
+      // 视频纹理：.tex 名下的裸 MP4/WebM，或 .tex 容器内嵌整段视频（千咲带水印.tex 实测）
+      if (buffer.length > 12 && buffer.slice(4, 8).toString('latin1') === 'ftyp') {
+        res.setHeader('Content-Type', 'video/mp4')
+        res.setHeader('Cache-Control', 'public, max-age=86400')
+        return res.send(buffer)
+      }
+      if (buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
+        res.setHeader('Content-Type', 'video/webm')
+        res.setHeader('Cache-Control', 'public, max-age=86400')
+        return res.send(buffer)
+      }
+      try {
+        const tex = parseTex(buffer)
+        const mip0 = tex.images[0]?.mipmaps[0]
+        if (mip0 && !mip0.error) {
+          const d = mip0.data
+          if (d && d.length > 12 && Buffer.from(d.buffer, d.byteOffset + 4, 4).toString('latin1') === 'ftyp') {
+            res.setHeader('Content-Type', 'video/mp4')
+            res.setHeader('Cache-Control', 'public, max-age=86400')
+            return res.send(Buffer.from(d.buffer, d.byteOffset, d.length))
+          }
+          if (tex.imageFormat === 13 || tex.imageFormat === 2) {
+            // 内嵌完整 PNG/JPEG
+            res.setHeader('Content-Type', tex.imageFormat === 13 ? 'image/png' : 'image/jpeg')
+            res.setHeader('Cache-Control', 'public, max-age=86400')
+            return res.send(mip0.data)
+          }
+          res.setHeader('Content-Type', 'application/octet-stream')
+          res.setHeader('X-Wf-Tex-Format', tex.formatName)
+          res.setHeader('X-Wf-Tex-Width', String(mip0.width))
+          res.setHeader('X-Wf-Tex-Height', String(mip0.height))
+          res.setHeader('X-Wf-Tex-Canvas', tex.textureWidth + 'x' + tex.textureHeight)
+          res.setHeader('X-Wf-Tex-Clamp', tex.clampUVs ? '1' : '0')
+          res.setHeader('X-Wf-Tex-Nearest', tex.noInterpolation ? '1' : '0')
+          res.setHeader('Cache-Control', 'public, max-age=86400')
+          return res.send(mip0.data)
+        }
+      } catch (error) {
+        console.warn('[WEScene] tex 解析失败，按原始字节返回:', name, error.message)
+      }
+    }
+
+    const ext = extname(String(name)).toLowerCase().replace('.', '')
+    const contentType = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    }[ext] || 'application/octet-stream'
+    res.setHeader('Content-Type', contentType)
+    res.setHeader('Cache-Control', 'public, max-age=86400')
+    res.send(buffer)
+  } catch (error) {
+    console.error('[WEScene] 资产获取失败:', error)
+    res.status(500).send('资产获取失败')
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Web 壁纸静态服务：/api/wallpaper-engine/web/<b64dir>/<相对路径>
+// b64dir = 壁纸目录绝对路径的 base64url（规避中文/反斜杠进 URL）。iframe 以同源 http
+// 加载入口 html（桌面模式 web 联动通道），html 内相对资源走自然路径解析。
+// 安全校验与 scene/asset 同口径：目录必须在 WE 根内；相对路径禁止穿越；扩展名白名单。
+// ---------------------------------------------------------------------------
+const WE_WEB_CONTENT_TYPES = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+  '.gif': 'image/gif', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.ico': 'image/x-icon',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.m4v': 'video/x-m4v',
+  '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+  '.wasm': 'application/wasm',
+  '.ttf': 'font/ttf', '.otf': 'font/otf', '.woff': 'font/woff', '.woff2': 'font/woff2',
+}
+// b64dir → 校验后的壁纸目录缓存（undefined=未查；null=不在 WE 根内）
+const weWebBaseCache = new Map()
+
+app.use('/api/wallpaper-engine/web', async (req, res) => {
+  try {
+    const full = String(req.originalUrl || req.url || '').split('?')[0]
+    const m = full.match(/^\/api\/wallpaper-engine\/web\/([A-Za-z0-9\-_]+)(?:\/(.*))?$/)
+    if (!m) return res.status(400).send('路径格式非法')
+    const b64dir = m[1]
+    // relPath 逐段解码后校验：禁止反斜杠与 .. 段（%2e%2e 穿越防线一）
+    const relSegments = decodeURIComponent(m[2] || '').split('/')
+    if (relSegments.some(segment => segment === '..' || segment.includes('\\') || segment.includes(':'))) {
+      return res.status(400).send('非法资源路径')
+    }
+    const relPath = relSegments.filter(Boolean).join('/') || ''
+
+    let dir = weWebBaseCache.get(b64dir)
+    if (dir === undefined) {
+      let decoded = ''
+      try {
+        decoded = Buffer.from(b64dir, 'base64url').toString('utf8')
+      } catch {
+        weWebBaseCache.set(b64dir, null)
+        return res.status(400).send('目录编码非法')
+      }
+      // 复用 scene 目录解析：绝对路径必须位于 WE 根内且含 project.json（防线二）
+      dir = await resolveWallpaperEngineSceneDir(decoded)
+      if (weWebBaseCache.size > 32) weWebBaseCache.clear()
+      weWebBaseCache.set(b64dir, dir)
+    }
+    if (!dir) return res.status(404).send('壁纸目录未找到或不在 Wallpaper Engine 目录内')
+
+    const filePath = resolve(dir, relPath || 'index.html')
+    // 防线三：解析后的绝对路径必须仍在壁纸目录内
+    if (filePath !== resolve(dir) && !filePath.startsWith(resolve(dir) + sep)) {
+      return res.status(400).send('资源越界')
+    }
+    const ext = extname(filePath).toLowerCase()
+    if (!WE_WEB_CONTENT_TYPES[ext]) return res.status(403).send('不支持的资源类型')
+    let buffer
+    try {
+      buffer = readFileSync(filePath)
+    } catch {
+      return res.status(404).send('资源未找到')
+    }
+
+    const isHtml = ext === '.html' || ext === '.htm'
+    res.setHeader('Content-Type', WE_WEB_CONTENT_TYPES[ext])
+    // html 短缓存：WE 壁纸更新后 iframe 能尽快拿到新版
+    res.setHeader('Cache-Control', isHtml ? 'public, max-age=60' : 'public, max-age=86400')
+    if (isHtml) {
+      // 注入 <base>：壁纸里 src="/xxx"、href="/xxx" 这类根绝对路径会打到 3001 根而 404，
+      // 重写到壁纸目录路由后相对/绝对引用都能解析
+      const baseHref = `/api/wallpaper-engine/web/${b64dir}/`
+      let html = buffer.toString('utf8')
+      if (/<head[^>]*>/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, match => `${match}<base href="${baseHref}">`)
+      } else {
+        html = `<base href="${baseHref}">` + html
+      }
+      return res.send(html)
+    }
+    res.send(buffer)
+  } catch (error) {
+    console.error('[WEWeb] web 壁纸资源下发失败:', error)
+    res.status(500).send('web 壁纸资源下发失败')
+  }
+})
+
+// ---------------------------------------------------------------------------
+// WebWallGL (wwgl) 场景包静态服务：/api/wallpaper-engine/scene/wwgl/<id>/<相对路径>
+// 供 webwallgl httpSource 拉取 workshop 场景包（scene.pkg / 贴图 / 音视频）——
+// httpSource 约定：base URL 下依次尝试 scene.pkg / scenes/scene.pkg / gifscene.pkg，
+// 松散工程另拉 project.json 后逐文件获取。安全校验与 web 路由同口径（WE 根内 / 禁穿越 / 白名单）。
+// ---------------------------------------------------------------------------
+const WE_WWGL_CONTENT_TYPES = {
+  ...WE_WEB_CONTENT_TYPES,
+  '.pkg': 'application/octet-stream',
+  '.tex': 'application/octet-stream',
+  '.vert': 'text/plain; charset=utf-8',
+  '.frag': 'text/plain; charset=utf-8',
+  '.glsl': 'text/plain; charset=utf-8',
+  '.bin': 'application/octet-stream',
+  '.mdl': 'application/octet-stream',
+  '.fls': 'application/octet-stream',
+  '.ptf': 'application/octet-stream',
+  '.mtn': 'application/octet-stream',
+  '.gif': 'image/gif',
+}
+
+app.use('/api/wallpaper-engine/scene/wwgl', async (req, res) => {
+  try {
+    const full = String(req.originalUrl || req.url || '').split('?')[0]
+    const m = full.match(/^\/api\/wallpaper-engine\/scene\/wwgl\/(.+)$/)
+    if (!m) return res.status(400).send('路径格式非法')
+    // relPath 逐段解码后校验：禁止反斜杠与 .. 段（与 web 路由同口径）
+    const segments = decodeURIComponent(m[1]).split('/')
+    if (segments.some(segment => segment === '..' || segment.includes('\\') || segment.includes(':'))) {
+      return res.status(400).send('非法资源路径')
+    }
+    if (segments.length < 2) return res.status(400).send('缺少资源路径')
+    // 两种 id 形态：
+    // ① b64 模式：/wwgl/b64/<base64url(壁纸目录绝对路径)>/<资源> —— 同步联动传入的是
+    //    Windows 绝对路径（含盘符冒号与反斜杠），无法直接进 URL，走 b64（与 web 路由同模式）；
+    // ② id 前缀试探：workshop id 无斜杠（1 段）；官方壁纸 id 形如 defaultprojects/<名>（2 段）。
+    let dir = null
+    let relPath = ''
+    if (segments[0] === 'b64' && segments.length >= 3) {
+      let decoded = ''
+      try {
+        decoded = Buffer.from(segments[1], 'base64url').toString('utf8')
+      } catch {
+        return res.status(400).send('目录编码非法')
+      }
+      dir = await resolveWallpaperEngineSceneDir(decoded)
+      relPath = segments.slice(2).join('/')
+    } else {
+      for (const take of [1, 2]) {
+        if (segments.length <= take) break
+        const candidate = await resolveWallpaperEngineSceneDir(segments.slice(0, take).join('/'))
+        if (candidate) {
+          dir = candidate
+          relPath = segments.slice(take).join('/')
+          break
+        }
+      }
+    }
+    if (!dir) return res.status(404).send('壁纸目录未找到')
+    if (!relPath) return res.status(400).send('缺少资源路径')
+
+    const filePath = resolve(dir, relPath)
+    if (filePath !== resolve(dir) && !filePath.startsWith(resolve(dir) + sep)) {
+      return res.status(400).send('资源越界')
+    }
+    const ext = extname(filePath).toLowerCase()
+    if (!WE_WWGL_CONTENT_TYPES[ext]) return res.status(403).send('不支持的资源类型')
+    let buffer
+    try {
+      buffer = readFileSync(filePath)
+    } catch {
+      return res.status(404).send('资源未找到')
+    }
+
+    res.setHeader('Content-Type', WE_WWGL_CONTENT_TYPES[ext])
+    res.setHeader('Cache-Control', ext === '.json' ? 'public, max-age=60' : 'public, max-age=86400')
+    res.send(buffer)
+  } catch (error) {
+    console.error('[WEWWGL] 场景包资源下发失败:', error)
+    res.status(500).send('场景包资源下发失败')
   }
 })
 

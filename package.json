@@ -196,6 +196,7 @@
     "@tanstack/react-virtual": "^3.14.10",
     "adm-zip": "^0.6.0",
     "bonjour-service": "^1.4.4",
+    "webwallgl": "3.0.1",
     "china-area-data": "^5.0.1",
     "compression": "^1.8.1",
     "country-state-city": "^3.2.1",
@@ -260,7 +261,8 @@
         }
       },
       "useragent": "npm:useragent-ng@2.4.5"
-    }
+    },
+    "mediabunny": "1.65.0"
   },
   "optionalDependencies": {
     "@lox-audioserver/node-librespot": "^0.5.1"

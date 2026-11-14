@@ -18,11 +18,12 @@ export interface DesktopWallpaperFile {
 
 export interface DesktopLiveWallpaperSource {
   kind: 'wallpaper-engine'
-  sourceType: 'video' | 'web'
-  url: string
+  sourceType: 'video' | 'web' | 'scene'
+  url?: string
   path: string
   title?: string
   id?: string // 壁纸 ID，用于跳过不支持的视频
+  fallbackPreview?: string // scene 实时渲染失败时回退的静态预览 URL
 }
 
 export type DesktopWallpaperMode = 'single' | 'slideshow' | 'random-api'
@@ -48,7 +49,7 @@ const MAX_FILES = 12
 const MAX_FILE_SIZE = 1024 * 1024 * 1024 // 1GB
 
 type ElectronWallpaperResult = {
-  success: boolean
+  success?: boolean
   path?: string
   fileUrl?: string
   dataUrl?: string
@@ -60,7 +61,23 @@ type ElectronWallpaperResult = {
     sourceType: string
     title?: string
     unsupported?: boolean
+    /** scene 类型：project.json 的 preview 静态图（3001 media URL），实时渲染失败时回退 */
+    previewUrl?: string
+    /** web 类型：入口 html 文件名（配合 path=壁纸目录 拼静态路由 URL） */
+    entry?: string
   }
+}
+
+/**
+ * WE web 壁纸静态路由 URL：/api/wallpaper-engine/web/<b64url(壁纸目录)>/<入口 html>。
+ * 3001 会校验目录位于 WE 根内、给 html 注入 <base>，html 里的相对/根绝对资源都能解析。
+ */
+function buildWeWebRouteUrl(dir: string, entry: string): string {
+  const bytes = new TextEncoder().encode(dir)
+  let binary = ''
+  for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index])
+  const b64dir = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `http://127.0.0.1:3001/api/wallpaper-engine/web/${b64dir}/${entry}`
 }
 
 /**
@@ -80,12 +97,24 @@ export function toWallpaperUrl(raw: string | null | undefined): string {
   return value
 }
 
-function wallpaperResultToSource(result: ElectronWallpaperResult): string | DesktopLiveWallpaperSource | null {
-  console.log('[wallpaperResultToSource] Processing result:', result)
-  if (!result.success) return null
+/**
+ * 实时壁纸源的签名：挂载路径（loadWallpaper）与 watcher 推送路径必须用**同一份构造**，
+ * 否则签名永远不相等 → 每次 watcher 推送都被误判为"壁纸变化"→ 反复重应用
+ * （2026-11-03 实证：scene 源无 url 字段，旧代码挂载侧 `${url}` 得 "undefined"、
+ * 推送侧 `${url ?? ''}` 得空串 → 只有 scene 壁纸中招，过场动画类壁纸反复重载）。
+ */
+export function liveWallpaperSignature(source: DesktopLiveWallpaperSource): string {
+  return `live:${source.sourceType}:${source.url ?? ''}:${source.path}`
+}
+
+/** Electron 壁纸结果 → 渲染源：挂载路径与 watcher 推送路径共用这一份映射（防两处逻辑漂移） */
+export function wallpaperResultToSource(result: ElectronWallpaperResult): string | DesktopLiveWallpaperSource | null {
+  // watcher 推送的 payload 不带 success 字段（只有 IPC 才包 {success:true,...}）：
+  // 只对显式 false 判失败，否则联动推送会被这里吞掉
+  if (result.success === false) return null
   const engine = result.wallpaperEngine
   console.log('[wallpaperResultToSource] Engine data:', engine)
-  
+
   // 检查是否是不支持的壁纸类型
   if (engine?.unsupported) {
     console.warn('[wallpaperResultToSource] Unsupported wallpaper detected! Type:', engine.sourceType, 'Path:', engine.path)
@@ -99,14 +128,42 @@ function wallpaperResultToSource(result: ElectronWallpaperResult): string | Desk
     // 返回系统壁纸作为回退（若为 UNC 路径则规范化为 file:// 形式）
     return toWallpaperUrl(result.dataUrl || result.fileUrl || result.path) || null
   }
-  
-  if (engine && (engine.sourceType === 'video' || engine.sourceType === 'web')) {
+
+  if (engine && engine.sourceType === 'video') {
+    // 联动媒体走 3001 HTTP 代理（与手动选择壁纸同一条已验证路径）：waveforge-media
+    // 自定义协议在 http 页面 <video> 中存在加载不确定性，且白名单是主进程内存态。
+    const engineMediaAbs = engine.path
+      ? `http://localhost:3001/api/wallpaper-engine/media?abs=${encodeURIComponent(engine.path)}`
+      : ''
     return {
       kind: 'wallpaper-engine',
-      sourceType: engine.sourceType,
-      url: toWallpaperUrl(engine.mediaUrl || engine.fileUrl || engine.path) || '',
+      sourceType: 'video',
+      url: engineMediaAbs || toWallpaperUrl(engine.mediaUrl || engine.fileUrl || engine.path) || '',
       path: engine.path || '',
       title: engine.title
+    }
+  }
+  // web 类型：3001 静态路由真渲染（iframe 通道），不再是「找不到视频就回退系统壁纸」
+  if (engine && engine.sourceType === 'web' && engine.path) {
+    return {
+      kind: 'wallpaper-engine',
+      sourceType: 'web',
+      url: buildWeWebRouteUrl(engine.path, engine.entry || 'index.html'),
+      path: engine.path,
+      title: engine.title,
+      fallbackPreview: engine.previewUrl || undefined
+    }
+  }
+  // scene 类型（WE 工程 project.json）：无 mediaUrl 可播，走前端实时渲染管线。
+  // path = 壁纸目录绝对路径（主进程已做 dirname），由 WallpaperEngineSceneCanvas
+  // 通过 3001 的 manifest 端点加载（id 传绝对路径，服务端校验位于 WE 根内）。
+  if (engine && engine.sourceType === 'scene' && engine.path) {
+    return {
+      kind: 'wallpaper-engine',
+      sourceType: 'scene',
+      path: engine.path,
+      title: engine.title,
+      fallbackPreview: engine.previewUrl || undefined
     }
   }
   return toWallpaperUrl(result.dataUrl || result.fileUrl || result.path) || null

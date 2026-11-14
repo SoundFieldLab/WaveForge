@@ -4,7 +4,7 @@
  */
 import { useState, useRef, useEffect, useMemo, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Image, Monitor, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Music2, TrendingUp, Disc3, Rocket, Cpu, Volume2, Timer, Shuffle, ListOrdered, Settings2 } from 'lucide-react'
+import { X, Image, Monitor, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Music2, TrendingUp, Disc3, Rocket, Cpu, Volume2, Timer, Settings2 } from 'lucide-react'
 import { desktopWallpaperManager, DesktopWallpaperFile, DesktopWallpaperMode, DesktopWallpaperPlayMode, RandomImageSource, DesktopWallpaperSwitchMode } from '../services/desktopWallpaperManager'
 import {
   DESKTOP_CUSTOMIZATION_EVENT,
@@ -14,16 +14,11 @@ import {
   loadDesktopCustomization,
   saveDesktopCustomization,
 } from '../services/desktopCustomization'
-import type {
-  WallpaperEngineRotationSettings,
-  WallpaperEngineWallpaper,
-} from '../services/wallpaperEngineRotation'
 import type { LocationOption } from '../services/locationHierarchy'
 import { MirroredGlobalSettings, makeSkin } from './MirroredGlobalSettings'
 import type { MirrorActionId } from '../services/globalSettingsRegistry'
 import { useTvBack } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
-import { getApiOrigin } from '../services/apiConfig'
 
 // 全局设置镜像里的共享弹窗（按需加载，与简约 / 传统 / 探索模式同一组件）
 const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
@@ -33,15 +28,7 @@ const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'
 interface DesktopSettingsModalProps {
   show: boolean
   onClose: () => void
-  weWallpapers: WallpaperEngineWallpaper[]
-  weLoading: boolean
-  weError: string | null
-  selectedWeWallpaper: string | null
   wallpaperSyncEnabled: boolean
-  onScanWeWallpapers: () => void
-  onSelectWeWallpaper: (wallpaper: WallpaperEngineWallpaper) => void
-  wallpaperRotation: WallpaperEngineRotationSettings
-  onWallpaperRotationChange: (settings: WallpaperEngineRotationSettings) => void
   onWallpaperSyncToggle: (enabled: boolean) => void
   onOpenCustomizer: () => void
   /** 音质设置弹窗需要的平台登录态（全局设置镜像） */
@@ -51,21 +38,13 @@ interface DesktopSettingsModalProps {
   qqVip?: boolean
 }
 
-type SubmenuType = null | 'customize' | 'wallpaper' | 'wallpaper-engine' | 'global'
+type SubmenuType = null | 'customize' | 'wallpaper' | 'global'
 type LocationHierarchyModule = typeof import('../services/locationHierarchy')
 
 export default function DesktopSettingsModal({
   show,
   onClose,
-  weWallpapers,
-  weLoading,
-  weError,
-  selectedWeWallpaper,
   wallpaperSyncEnabled,
-  onScanWeWallpapers,
-  onSelectWeWallpaper,
-  wallpaperRotation,
-  onWallpaperRotationChange,
   onWallpaperSyncToggle,
   onOpenCustomizer,
   neteaseLoggedIn = false,
@@ -136,13 +115,6 @@ export default function DesktopSettingsModal({
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string>('')
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Wallpaper Engine 手动选择的壁纸（实际写入键是 DesktopView 的 selectedWeWallpaper，
-  // 此前读的 selectedWallpaperEngineId 全仓无人写，文案永远显示未选择）
-  const [selectedWallpaperEngineId] = useState<string | null>(() => {
-    const saved = localStorage.getItem('selectedWeWallpaper')
-    return saved || null
-  })
 
   // 歌单卡片大小
   const [playlistCardSize, setPlaylistCardSize] = useState(() => {
@@ -501,7 +473,8 @@ export default function DesktopSettingsModal({
 
 
   return (
-    <AnimatePresence>
+    <>
+      <AnimatePresence>
       {show && (
         <>
           {/* 背景遮罩 */}
@@ -523,7 +496,7 @@ export default function DesktopSettingsModal({
             className="fixed left-1/2 top-1/2 z-[201] max-h-[calc(100vh-2rem)] w-[min(672px,calc(100vw-1rem))] -translate-x-1/2 -translate-y-1/2"
           >
             {/* 玻璃态卡片 */}
-            <div 
+            <div
               className="overflow-hidden rounded-3xl shadow-2xl"
               style={{
                 background: 'linear-gradient(135deg, rgba(0,0,0,0.85) 0%, rgba(15,15,25,0.9) 50%, rgba(0,0,0,0.85) 100%)',
@@ -546,7 +519,6 @@ export default function DesktopSettingsModal({
                     <h2 className="text-2xl font-bold text-white">
                       {activeSubmenu === 'customize' && '自定义桌面'}
                       {activeSubmenu === 'wallpaper' && '自定义壁纸'}
-                      {activeSubmenu === 'wallpaper-engine' && 'WallpaperEngine'}
                       {activeSubmenu === 'global' && '全局设置'}
                     </h2>
                   </>
@@ -668,34 +640,6 @@ export default function DesktopSettingsModal({
                           )}
                         </div>
                       </div>
-                      )}
-
-                      {/* WallpaperEngine 卡片 */}
-                      {!isTvModeActive() && (
-                      <button
-                        onClick={() => enterSubmenu('wallpaper-engine')}
-                        className="w-full bg-white/5 hover:bg-white/10 rounded-xl p-4 border border-white/10 transition-all text-left"
-                        disabled={wallpaperSyncEnabled}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center">
-                              <Monitor className="w-5 h-5 text-indigo-400" />
-                            </div>
-                            <div>
-                              <h3 className="text-lg font-semibold text-white">浏览壁纸引擎</h3>
-                              <p className="text-white/60 text-sm">
-                                {wallpaperSyncEnabled 
-                                  ? '请先关闭同步功能' 
-                                  : selectedWallpaperEngineId 
-                                    ? '已选择壁纸' 
-                                    : '将壁纸引擎中壁纸手动加载至桌面模式'}
-                              </p>
-                            </div>
-                          </div>
-                          <ChevronRight className={`w-5 h-5 ${wallpaperSyncEnabled ? 'text-white/20' : 'text-white/40'}`} />
-                        </div>
-                      </button>
                       )}
 
                       {/* 歌单显示设置 */}
@@ -1566,227 +1510,6 @@ export default function DesktopSettingsModal({
                         </motion.div>
                       )}
                     </motion.div>
-                  ) : activeSubmenu === 'wallpaper-engine' ? (
-                    // WallpaperEngine 二级菜单
-                    <motion.div
-                      key="wallpaper-engine-submenu"
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -20 }}
-                      transition={{ duration: 0.2 }}
-                      className="space-y-6"
-                    >
-                      <div className="text-white/60 text-sm mb-4">
-                        从您的 WallpaperEngine 库中选择动态壁纸作为背景
-                      </div>
-
-                      {/* 提示：需要关闭同步 */}
-                      {wallpaperSyncEnabled && (
-                        <div className="bg-amber-500/20 border border-amber-500/50 rounded-xl p-4">
-                          <div className="flex items-start gap-3">
-                            <div className="text-amber-400 mt-0.5">⚠️</div>
-                            <div>
-                              <div className="text-amber-200 font-medium mb-1">需要关闭同步功能</div>
-                              <div className="text-amber-200/80 text-sm">
-                                请先在上一级菜单中关闭"Wallpaper Engine 同步"，才能手动选择壁纸
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* WallpaperEngine 壁纸列表 */}
-                      {!wallpaperSyncEnabled && (
-                        <div>
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="text-white font-medium">可用壁纸</div>
-                            <button
-                              onClick={onScanWeWallpapers}
-                              disabled={weLoading}
-                              className="px-4 py-2 rounded-lg bg-pink-500 hover:bg-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-white text-sm font-medium flex items-center gap-2"
-                            >
-                              {weLoading ? (
-                                <>
-                                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                  扫描中...
-                                </>
-                              ) : (
-                                <>
-                                  <RotateCcw className="w-4 h-4" />
-                                  扫描壁纸
-                                </>
-                              )}
-                            </button>
-                          </div>
-
-                          <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.045] p-4">
-                            <div className="flex items-start justify-between gap-4">
-                              <div className="flex min-w-0 items-start gap-3">
-                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-pink-500/15 text-pink-200"><Timer className="h-5 w-5" /></div>
-                                <div>
-                                  <div className="font-medium text-white">自动切换已选壁纸</div>
-                                  <div className="mt-1 text-xs leading-5 text-white/45">只会轮换你单独勾选的壁纸，不会默认使用整个壁纸库。</div>
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                disabled={wallpaperRotation.selectedWallpaperIds.length < 2}
-                                onClick={() => onWallpaperRotationChange({ ...wallpaperRotation, enabled: !wallpaperRotation.enabled })}
-                                className={`relative mt-1 h-7 w-12 shrink-0 rounded-full transition ${wallpaperRotation.enabled ? 'bg-pink-500' : 'bg-white/15'} disabled:cursor-not-allowed disabled:opacity-35`}
-                                aria-label="自动切换 Wallpaper Engine 壁纸"
-                                aria-pressed={wallpaperRotation.enabled}
-                              >
-                                <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all ${wallpaperRotation.enabled ? 'left-6' : 'left-1'}`} />
-                              </button>
-                            </div>
-
-                            <div className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)] gap-3">
-                              <label className="rounded-xl border border-white/8 bg-black/20 p-3">
-                                <span className="text-[11px] text-white/45">切换间隔（分钟）</span>
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={1440}
-                                  value={wallpaperRotation.intervalMinutes}
-                                  onChange={event => onWallpaperRotationChange({ ...wallpaperRotation, intervalMinutes: Number(event.target.value) })}
-                                  className="mt-2 h-9 w-full rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-white outline-none focus:border-pink-400/60"
-                                />
-                              </label>
-                              <div className="rounded-xl border border-white/8 bg-black/20 p-3">
-                                <div className="text-[11px] text-white/45">切换方式</div>
-                                <div className="mt-2 grid grid-cols-2 gap-2">
-                                  <button type="button" onClick={() => onWallpaperRotationChange({ ...wallpaperRotation, mode: 'sequential' })} className={`flex h-9 items-center justify-center gap-1.5 rounded-lg border text-xs transition ${wallpaperRotation.mode === 'sequential' ? 'border-pink-400/60 bg-pink-500/16 text-pink-100' : 'border-white/8 bg-white/[0.035] text-white/55'}`}><ListOrdered className="h-3.5 w-3.5" />顺序</button>
-                                  <button type="button" onClick={() => onWallpaperRotationChange({ ...wallpaperRotation, mode: 'random' })} className={`flex h-9 items-center justify-center gap-1.5 rounded-lg border text-xs transition ${wallpaperRotation.mode === 'random' ? 'border-pink-400/60 bg-pink-500/16 text-pink-100' : 'border-white/8 bg-white/[0.035] text-white/55'}`}><Shuffle className="h-3.5 w-3.5" />随机</button>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="mt-3 flex items-center justify-between gap-3 text-xs">
-                              <span className={wallpaperRotation.selectedWallpaperIds.length >= 2 ? 'text-emerald-300/85' : 'text-amber-200/75'}>
-                                已选择 {wallpaperRotation.selectedWallpaperIds.length} 张{wallpaperRotation.selectedWallpaperIds.length < 2 ? '，至少选择 2 张才能开启' : ''}
-                              </span>
-                              {wallpaperRotation.selectedWallpaperIds.length > 0 && (
-                                <button type="button" onClick={() => onWallpaperRotationChange({ ...wallpaperRotation, enabled: false, selectedWallpaperIds: [] })} className="text-white/45 transition hover:text-white/75">清空选择</button>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* 错误提示 */}
-                          {weError && (
-                            <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-xl text-red-200 text-sm">
-                              {weError}
-                            </div>
-                          )}
-
-                          {/* 壁纸网格 */}
-                          {weWallpapers.length > 0 ? (
-                            <div className="grid grid-cols-2 gap-3 max-h-[400px] overflow-y-auto pr-2" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.3) transparent' }}>
-                              {weWallpapers.map((wallpaper) => {
-                                const participatesInRotation = wallpaperRotation.selectedWallpaperIds.includes(wallpaper.id)
-                                return (
-                                <motion.div
-                                  key={wallpaper.id}
-                                  whileHover={{ scale: 1.03 }}
-                                  onClick={() => onSelectWeWallpaper(wallpaper)}
-                                  className={`relative aspect-video rounded-xl overflow-hidden cursor-pointer border-2 transition-all ${
-                                    selectedWeWallpaper === wallpaper.id
-                                      ? 'border-pink-500 shadow-lg shadow-pink-500/30'
-                                      : participatesInRotation
-                                        ? 'border-cyan-400/70 shadow-lg shadow-cyan-500/15'
-                                        : 'border-white/10 hover:border-white/30'
-                                  }`}
-                                >
-                                  <button
-                                    type="button"
-                                    onClick={event => {
-                                      event.stopPropagation()
-                                      const selectedWallpaperIds = participatesInRotation
-                                        ? wallpaperRotation.selectedWallpaperIds.filter(id => id !== wallpaper.id)
-                                        : [...wallpaperRotation.selectedWallpaperIds, wallpaper.id]
-                                      onWallpaperRotationChange({
-                                        ...wallpaperRotation,
-                                        enabled: wallpaperRotation.enabled && selectedWallpaperIds.length >= 2,
-                                        selectedWallpaperIds,
-                                      })
-                                    }}
-                                    className={`absolute left-2 top-2 z-20 flex h-7 w-7 items-center justify-center rounded-lg border backdrop-blur-md transition ${participatesInRotation ? 'border-cyan-300/70 bg-cyan-400/80 text-slate-950' : 'border-white/20 bg-black/45 text-white/65 hover:bg-black/65'}`}
-                                    aria-label={participatesInRotation ? '从自动轮换中移除' : '加入自动轮换'}
-                                    title={participatesInRotation ? '从自动轮换中移除' : '加入自动轮换'}
-                                  >
-                                    {participatesInRotation ? <Check className="h-4 w-4" /> : <span className="h-2.5 w-2.5 rounded-[3px] border border-current" />}
-                                  </button>
-                                  {wallpaper.preview ? (
-                                    <img
-                                      src={`${getApiOrigin()}${wallpaper.preview}`}
-                                      alt={wallpaper.title}
-                                      className="w-full h-full object-cover"
-                                      onError={(e) => {
-                                        e.currentTarget.style.display = 'none'
-                                      }}
-                                    />
-                                  ) : (
-                                    <div className="w-full h-full bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center">
-                                      <ImageIcon className="w-8 h-8 text-white/30" />
-                                    </div>
-                                  )}
-                                  
-                                  {/* 标题覆盖层 */}
-                                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent flex items-end p-2">
-                                    <div className="w-full">
-                                      <div className="text-white text-xs font-medium truncate">
-                                        {wallpaper.title}
-                                      </div>
-                                      <div className="flex items-center gap-2 mt-1">
-                                        {wallpaper.type === 'video' && (
-                                          <span className="px-1.5 py-0.5 bg-pink-500/80 rounded text-[10px] text-white">
-                                            视频
-                                          </span>
-                                        )}
-                                        {wallpaper.type === 'web' && (
-                                          <span className="px-1.5 py-0.5 bg-blue-500/80 rounded text-[10px] text-white">
-                                            Web
-                                          </span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </div>
-
-                                  {/* 选中标记 */}
-                                  {selectedWeWallpaper === wallpaper.id && (
-                                    <div className="absolute top-2 right-2 w-6 h-6 bg-pink-500 rounded-full flex items-center justify-center">
-                                      <Check className="w-4 h-4 text-white" />
-                                    </div>
-                                  )}
-                                </motion.div>
-                                )
-                              })}
-                            </div>
-                          ) : !weLoading && !weError ? (
-                            <div className="text-center py-12">
-                              <ImageIcon className="w-12 h-12 text-white/20 mx-auto mb-3" />
-                              <div className="text-white/40 text-sm mb-4">
-                                点击"扫描壁纸"按钮开始扫描
-                              </div>
-                            </div>
-                          ) : null}
-
-                          {/* 功能说明 */}
-                          <div className="mt-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-xl">
-                            <div className="text-blue-200 text-sm">
-                              💡 <strong>功能说明：</strong>
-                              <br />
-                              • 此功能将扫描您的 WallpaperEngine 安装目录
-                              <br />
-                              • 列出所有支持的动态壁纸预览图
-                              <br />
-                              • 点击壁纸立即应用，左上角勾选框控制是否参与自动轮换
-                              <br />
-                              • 随机模式会避开当前壁纸，顺序模式会从当前壁纸的下一张继续
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </motion.div>
                   ) : activeSubmenu === 'global' ? (
                     // 全局设置二级菜单：镜像注册表（services/globalSettingsRegistry），
                     // 与简约 / 传统 / 探索模式同键同事件，任意一端修改全软件同步。
@@ -1848,5 +1571,6 @@ export default function DesktopSettingsModal({
         </>
       )}
     </AnimatePresence>
+    </>
   )
 }
