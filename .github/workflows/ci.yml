@@ -110,7 +110,20 @@ jobs:
           python-version: '3.13'
 
       - name: 构建 APK
-        run: cd android && ./gradlew assembleDebug --no-daemon
+        run: |
+          cd android
+          set +e
+          ./gradlew assembleDebug --no-daemon > gradle-ci.log 2>&1
+          status=$?
+          set -e
+          # 失败时把 gradle 尾部日志写入 Step Summary（公共仓库可匿名读取，便于无 gh 环境排障）
+          if [ $status -ne 0 ]; then
+            echo "### Gradle 构建失败（尾部 250 行）" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 250 gradle-ci.log >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $status
 
       - name: 上传 APK（可下载）
         uses: actions/upload-artifact@v4
