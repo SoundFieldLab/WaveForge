@@ -231,9 +231,6 @@ class PlaybackService : Service() {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() = dispatchTransport("play")
                 override fun onPause() = dispatchTransport("pause")
-                override fun onPlayPause() {
-                    dispatchTransport(if (lastPlaying) "pause" else "play")
-                }
                 override fun onSkipToNext() = dispatchTransport("next")
                 override fun onSkipToPrevious() = dispatchTransport("previous")
             })
