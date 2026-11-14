@@ -95,7 +95,9 @@ async function main() {
     })
     assert.equal(success.outcome, 'succeeded')
     assert.deepEqual(success.report.removed, ['WaveForgeProbe'])
-    assert.equal(fs.readFileSync(path.join(successRoot, 'chroma-repair', 'repair-chroma-app-list.ps1')).subarray(0, 3).toString('hex'), 'efbbbf')
+    // 提权载荷已内联 EncodedCommand 传递，不再落盘脚本文件（消除 TOCTOU 替换窗口）——
+    // 断言目录里没有 ps1 残留，防止修复回退到写文件方案
+    assert.equal(fs.existsSync(path.join(successRoot, 'chroma-repair', 'repair-chroma-app-list.ps1')), false)
     assert.ok(outerArgs.includes('-EncodedCommand'))
     assert.equal(outerArgs.some(value => value.includes('User Data') || value.includes('涟漪')), false)
 
