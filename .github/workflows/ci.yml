@@ -113,15 +113,15 @@ jobs:
         run: |
           cd android
           set +e
-          ./gradlew assembleDebug --no-daemon > gradle-ci.log 2>&1
+          ./gradlew assembleDebug --no-daemon --console=plain > gradle-ci.log 2>&1
           status=$?
           set -e
           # 失败时把关键报错段逐行转成 ::error:: annotations（公共仓库匿名可读，
-          # 便于无 gh/token 环境排障），完整日志另传 artifact
+          # 便于无 gh/token 环境排障），完整日志另传 artifact。
+          # 注：单 step 最多 10 条注解，错误行优先于 What-went-wrong 块。
           if [ $status -ne 0 ]; then
-            grep -n -A 40 "What went wrong" gradle-ci.log | head -n 60 | sed 's/^/::error::/' || true
-            # Kotlin/AGP 具体错误行（e: 前缀）与 AAPT error
-            grep -E "^e: |error: |ERROR: " gradle-ci.log | head -n 40 | sed 's/^/::error::/' || true
+            grep -iE "error|e: " gradle-ci.log | grep -vE "warnings?|W0[0-9]|deprecat" | head -n 12 | sed 's/^/::error::/' || true
+            grep -n -A 40 "What went wrong" gradle-ci.log | head -n 40 | sed 's/^/::error::/' || true
             echo "### Gradle 构建失败（尾部 250 行）" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             tail -n 250 gradle-ci.log >> "$GITHUB_STEP_SUMMARY" || true
