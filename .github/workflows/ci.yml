@@ -120,6 +120,8 @@ jobs:
           # 便于无 gh/token 环境排障），完整日志另传 artifact
           if [ $status -ne 0 ]; then
             grep -n -A 40 "What went wrong" gradle-ci.log | head -n 60 | sed 's/^/::error::/' || true
+            # Kotlin/AGP 具体错误行（e: 前缀）与 AAPT error
+            grep -E "^e: |error: |ERROR: " gradle-ci.log | head -n 40 | sed 's/^/::error::/' || true
             echo "### Gradle 构建失败（尾部 250 行）" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             tail -n 250 gradle-ci.log >> "$GITHUB_STEP_SUMMARY" || true
