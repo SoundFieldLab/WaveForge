@@ -66,6 +66,8 @@ export interface BilibiliViewData {
     mid: number
     name: string
     officialVerifyType: number // B 站原始值：-1 未认证/未知，0 个人认证，1 机构认证
+    /** 认证名（机构认证如「崩坏：星穹铁道官方账号」）：官号归属通用兜底用（2026-11-17） */
+    officialVerifyTitle?: string
   }
 }
 
@@ -1051,6 +1053,11 @@ const NEGATIVE_MARKERS = [
   // 0.23、Favorite Girl→「…tik tok直播时…录屏」0.12、Clair de lune→「大提琴视奏…」0.44。
   // osu!mania 规范化为 osumania，用无标点词条稳定命中。
   'osumania', 'osu mania', '试玩', '实况', '直播', '录屏', '视奏', '打歌', '打谱', '录像',
+  // 转录/试听号形态（2026-11-17，崩铁「无中生有」实测）：「百万级录音棚试听」「无损试听」
+  // 这类标题把歌名+主题曲正向词堆在前半段、以"试听/试看/抢先"自报**非正片本体**——
+  // 是播放画面的转录/预告式投稿，不是官方 MV。命中即按教学类重罚（-35 + negativeHit
+  // 挡自动播放门槛）。不收"试听"单字——官方发布物偶有「试听版」合法用例由完整版规则兜住。
+  '录音棚试听', '无损试听', '录音室试听', '试听版试听', '抢先试听', '百万级录音棚',
   // 统一按标题规范化口径比较：带空格/全角的词条（dance cover、sky studio…）原来直接与
   // 去空格的 titleNorm 比对，永远命不中（漏网标记），这里先规范化再参与匹配。
 ].map((m) => normalizeText(m))
@@ -1409,7 +1416,10 @@ const UPLOADER_WEIGHT_PROFILES: readonly UploaderWeightProfile[] = [
     queryScore: 2,
   },
   {
-    names: ['JLRS-LeoFM', 'JRS-LeoFM'],
+    // JLRS 家族转录号（用户实测反馈，2026-11-17）：三马甲全部拉黑。
+    // 「无中生有」实测漏网 third 马甲 JLRS-jayfm（mid 3493082817366845，
+    // 「百万级录音棚试听」式转录标题，BV1UzWX6fErs 盖过官方 EP BV1nEWu6xEyq）。
+    names: ['JLRS-LeoFM', 'JRS-LeoFM', 'JLRS-jayfm'],
     score: -45,
   },
   {
@@ -1497,6 +1507,11 @@ const VERIFIED_OFFICIAL_SOURCES: ScopedOfficialSource[] = [
   { mid: 147546636, scopes: ['valorant', '无畏契约'] },
   { mid: 2135890650, scopes: ['valorant', '无畏契约', 'riotgames', '拳头游戏'] },
   { mid: 27534330, scopes: ['崩坏3', 'honkaiimpact'] },
+  // 米哈游系游戏官号（2026-11-17 逐一实机核验：card API official type=1 机构认证）。
+  // 背景：崩铁 EP「无中生有」官方投稿（BV1nEWu6xEyq）被 JLRS-jayfm 转录号
+  // （标题堆「主题曲/试听」正向词）盖过——官号此前不在表内，officialChannel +25 拿不到。
+  { mid: 1340190821, scopes: ['崩坏星穹铁道', '星穹铁道', '崩铁', 'honkai:starrail', 'starrail'] },
+  { mid: 401742377, scopes: ['原神', 'genshinimpact', 'genshin'] },
   { mid: 1636034895, scopes: ['绝区零', 'zenlesszonezero'] },
   { mid: 161775300, scopes: ['明日方舟', 'arknights'] },
   { mid: 349984754, scopes: ['永劫无间', 'naraka'] },
@@ -1836,6 +1851,8 @@ export function inferRecordingTarget(ctx: MatchContext): RecordingTarget | undef
 export interface ScoreCandidateOptions {
   rank?: number
   officialVerifyType?: number
+  /** 复审拿到的认证名（机构认证如「崩坏：星穹铁道官方账号」）：IP 归属官号兜底用 */
+  officialVerifyTitle?: string
   manualZhSubtitle?: boolean
   autoSubtitle?: boolean
   preference?: MatchPreference
@@ -1911,9 +1928,22 @@ export function scoreCandidate(
   // alias 全等判定排除「别名规范化后 === 歌手主名」的项（繁体别名经繁转简后与主名相同）：
   // 否则『作者名=歌手本人』会同时命中 uploaderMatchesArtist 与 officialChannel，双份 +25/+10
   // 重复计分（用户实测：周杰伦别名表补齐后官号测试差值从 32.5 跳到 57.5）。
+  // 通用官号兜底（2026-11-17，崩铁 EP「无中生有」实测）：B 站**机构认证**（officialVerifyType=1）
+  // 且认证名命中当前作品的 IP 词（franchise 名/别名）→ 官方来源。VERIFIED_OFFICIAL_SOURCES 是
+  // 人工核验的封闭表，新游戏官号漏登记时（此前崩铁官号不在表内，官方 EP 被转录号盖过），
+  // 靠「机构认证 + 认证名归属校验」仍能识别——信任链与 matchesVerifiedOfficialSource 的
+  // 「MID 表 × 封闭别名表」双核验同构：认证名是 B 站背书的归属声明，IP 词来自封闭别名表。
+  // 搜索阶段 officialVerifyType 恒 -1（复审才有），此分支只在复审后生效——复审会把带认证的
+  // 官号候选重评并前插（compareCandidates 的 officialChannel 权重）。
+  const franchiseNormsForAuth = franchiseNamesOf(ctx).map(normalizeText).filter((name) => name.length >= 2)
+  const authVerifyTitle = normalizeText(String(extra?.officialVerifyTitle || ''))
+  const ipOwnedInstitutionalAuth = officialVerifyType === 1
+    && authVerifyTitle.length >= 2
+    && franchiseNormsForAuth.some((name) => authVerifyTitle.includes(name) || name.includes(authVerifyTitle))
   signals.officialChannel = matchesVerifiedOfficialSource(video, ctx, resolvedArtists)
     || OFFICIAL_CHANNEL_KEYWORDS.some((k) => authorNorm.includes(normalizeText(k)))
     || aliasNormList.some((alias) => authorNorm === alias && !artistNormList.includes(alias))
+    || ipOwnedInstitutionalAuth
 
   // 官方标记只有与艺人本人上传者相互印证时才成为可靠来源信号。
   if (signals.officialMarker && signals.uploaderMatchesArtist) score += 20
@@ -2918,7 +2948,7 @@ interface ReviewSubtitleSegment { from: number; text: string }
 /** 复审 view/字幕的全局 bvid 缓存（跨歌曲复用，1h TTL；LRU 上限防无界增长） */
 // 复审缓存键 = songKey::bvid：多 P 视频的分 P 选择（cid/effectiveDuration）依赖当前歌，
 // 只按 bvid 键会让 1 小时内后到的另一首歌复用前一首歌选中的分 P。
-const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number; subLines?: ReviewSubtitleSegment[] }>()
+const reviewCache = new Map<string, { at: number; officialVerifyType: number; officialVerifyTitle: string; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number; subLines?: ReviewSubtitleSegment[] }>()
 
 /**
  * 清除 MV 匹配缓存：24h 内存匹配结果 + 复审缓存 + 手动标记/黑名单（localStorage）。
@@ -3193,6 +3223,7 @@ async function reviewCandidates(
         try {
           const view = await getBilibiliView(bvid, signal)
           let officialVerifyType = -1
+          let officialVerifyTitle = ''
           let cid = 0
           let effectiveDuration = 0
           let manualZh = false
@@ -3200,6 +3231,7 @@ async function reviewCandidates(
           let subLines: ReviewSubtitleSegment[] | undefined
           if (view.code === 0) {
             officialVerifyType = view.data.owner.officialVerifyType
+            officialVerifyTitle = String(view.data.owner.officialVerifyTitle || '')
             // 多 P（选集）视频：选择最匹配歌曲的分 P —— 该 P 的 cid 直接用于播放，
             // 该 P 时长用于评分（视频总时长对多版本合集无意义，避免错误重罚）
             if (Array.isArray(view.data.pages) && view.data.pages.length > 1) {
@@ -3239,14 +3271,14 @@ async function reviewCandidates(
               }
             }
           }
-          cached = { at: Date.now(), officialVerifyType, cid, manualZh, autoZh, effectiveDuration, subLines }
+          cached = { at: Date.now(), officialVerifyType, officialVerifyTitle, cid, manualZh, autoZh, effectiveDuration, subLines }
           reviewCache.set(reviewCacheKey, cached)
           pruneReviewCache()
         } catch {
           // 瞬时失败（网络抖动/上游 5xx）不写入 1h 正缓存：否则该候选会带着
           // cid=0 进入播放链（/playurl 必 400）且错失认证加分，只能靠回退链兜底。
           // 仅标记 -1 参与本次评分，缓存不落——下次匹配重试。
-          cached = { at: Date.now(), officialVerifyType: -1, cid: 0, manualZh: false, autoZh: false, effectiveDuration: 0 }
+          cached = { at: Date.now(), officialVerifyType: -1, officialVerifyTitle: '', cid: 0, manualZh: false, autoZh: false, effectiveDuration: 0 }
         }
       }
       const { manualZhSubtitle, autoSubtitle } = applyPreferenceToReview(cached, preference)
@@ -3258,6 +3290,7 @@ async function reviewCandidates(
       const rescored = scoreCandidate(candidate.video, ctx, {
         rank: candidate.rank,
         officialVerifyType: cached.officialVerifyType,
+        officialVerifyTitle: cached.officialVerifyTitle,
         manualZhSubtitle,
         autoSubtitle,
         preference,

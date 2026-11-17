@@ -432,6 +432,29 @@ describe('scoreCandidate（候选打分）', () => {
     expect(normal.score - jlrs.score).toBe(45)
   })
 
+  it('JLRS 家族三马甲全部降权（崩铁「无中生有」实测：第三马甲 JLRS-jayfm 漏网盖过官方 EP）', () => {
+    const ctx: MatchContext = { songTitle: '无中生有', artists: ['HOYO-MiX', '當山みれい'], songDuration: 220 }
+    const base = video({ title: '《崩坏：星穹铁道》星神★阿哈 主题曲「无中生有 Ex Nihilo」百万级录音棚试听', duration: 215, play: 50_000 })
+    const jayfm = scoreCandidate({ ...base, author: 'JLRS-jayfm' }, ctx)
+    const normal = scoreCandidate({ ...base, author: '普通音乐账号' }, ctx)
+    expect(normal.score - jayfm.score).toBe(45)
+  })
+
+  it('官号通用兜底：机构认证 + 认证名含 IP 词 → officialChannel（官号未登记 MID 表时）', () => {
+    const ctx: MatchContext = { songTitle: '无中生有', artists: ['HOYO-MiX'], songDuration: 220, franchise: '崩坏星穹铁道' }
+    // 用一个不在 VERIFIED_OFFICIAL_SOURCES 的 mid，纯走「认证名 × IP 词」兜底路径
+    const base = video({ title: '《崩坏：星穹铁道》EP：「无中生有」', duration: 220, play: 800_000, author: '崩坏星穹铁道', mid: 999_999_999_999 })
+    // 无认证信息（搜索阶段 officialVerifyType=-1）：不走认证兜底
+    const unverified = scoreCandidate(base, ctx, { officialVerifyType: -1 })
+    expect(unverified.signals.officialChannel).toBe(false)
+    // 机构认证 + 认证名含 IP 词：兜底命中
+    const authed = scoreCandidate(base, ctx, { officialVerifyType: 1, officialVerifyTitle: '崩坏：星穹铁道官方账号' })
+    expect(authed.signals.officialChannel).toBe(true)
+    // 机构认证但认证名不含 IP 词：不误判（任何机构号都是官方会导致认证泛滥）
+    const unrelated = scoreCandidate(base, ctx, { officialVerifyType: 1, officialVerifyTitle: '某某科技有限公司' })
+    expect(unrelated.signals.officialChannel).toBe(false)
+  })
+
   it('相对时长：10 分钟的长歌，±60 秒仍算贴近（比例而非绝对差）', () => {
     const longCtx: MatchContext = { songTitle: '长歌', artists: ['歌手'], songDuration: 600 }
     const near = scoreCandidate(video({ title: '歌手 长歌 MV', duration: 660 }), longCtx)

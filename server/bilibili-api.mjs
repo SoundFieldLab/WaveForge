@@ -339,19 +339,31 @@ const officialVerifyCache = new Map()
 const OFFICIAL_VERIFY_CACHE_TTL = 60 * 60 * 1000
 
 async function getOfficialVerifyType(mid, cookie) {
+  return (await getOfficialVerify(mid, cookie)).type
+}
+
+/**
+ * 官号认证信息（type + 认证名）：type 供既有认证加分；认证名（机构认证的 title，
+ * 如「崩坏：星穹铁道官方账号」「原神官方账号」）供前端做「认证名含 IP 词」的官号归属
+ * 通用兜底——VERIFIED_OFFICIAL_SOURCES 是人工核验的封闭表，新游戏官号（米哈游系等）
+ * 漏登记时，靠「机构认证 + 认证名命中 franchise/IP 词」仍能识别出官方来源。
+ */
+async function getOfficialVerify(mid, cookie) {
   const numericMid = Number(mid) || 0
-  if (!numericMid) return -1
+  if (!numericMid) return { type: -1, title: '' }
   const cached = officialVerifyCache.get(numericMid)
-  if (cached && Date.now() - cached.at < OFFICIAL_VERIFY_CACHE_TTL) return cached.type
+  if (cached && Date.now() - cached.at < OFFICIAL_VERIFY_CACHE_TTL) return cached
   try {
     const json = await fetchBiliJsonWithRiskRetry(`${API_BASE}/x/web-interface/card`, { params: { mid: numericMid }, cookie })
-    const type = Number(json.data?.card?.official_verify?.type)
+    const verify = json.data?.card?.official_verify || {}
+    const type = Number(verify.type)
     const normalized = type === 0 || type === 1 ? type : -1
-    officialVerifyCache.set(numericMid, { at: Date.now(), createdAt: Date.now(), type: normalized })
+    const entry = { at: Date.now(), createdAt: Date.now(), type: normalized, title: String(verify.title || '') }
+    officialVerifyCache.set(numericMid, entry)
     pruneCache(officialVerifyCache, OFFICIAL_VERIFY_CACHE_TTL, OFFICIAL_VERIFY_CACHE_MAX_ENTRIES)
-    return normalized
+    return entry
   } catch {
-    return -1
+    return { type: -1, title: '' }
   }
 }
 
@@ -436,7 +448,8 @@ export function registerBilibiliRoutes(app) {
       }
       const data = json.data || {}
       const page = (data.pages || [])[0] || {}
-      const officialVerifyType = await getOfficialVerifyType(data.owner?.mid, req.query.cookie)
+      const officialVerify = await getOfficialVerify(data.owner?.mid, req.query.cookie)
+      const officialVerifyType = officialVerify.type
       res.json({
         code: 0,
         data: {
@@ -459,6 +472,8 @@ export function registerBilibiliRoutes(app) {
             name: data.owner?.name || '',
             face: data.owner?.face || '',
             officialVerifyType,
+            // 机构/个人认证名（如「崩坏：星穹铁道官方账号」）：前端官号归属通用兜底用
+            officialVerifyTitle: officialVerify.title || '',
           },
         },
       })
