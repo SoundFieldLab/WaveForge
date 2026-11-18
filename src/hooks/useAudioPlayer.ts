@@ -2457,6 +2457,14 @@ export function useAudioPlayer(
       debugLog('⏭️ [AutoMix] 相同歌曲组合正在准备，跳过重复分析')
       return
     }
+    // ⚠️ key 占位必须先于 gate 门控（2026-11-18 修，实测栈溢出风暴）：
+    // gate.runWhenHealthy 在缓冲已健康时**同步**执行回调，回调里调 prepareAutoMix()。
+    // 若 key 占位（原 2516 行）在 gate 之后，同步重入时去重检查永远不命中 →
+    // 无限同步自递归（Maximum call stack size exceeded）+ 每层递归打一条 entry
+    // （实测一次切歌 2937 条 entry、CPU 白烧一轮，render-ok 实际只有 3 次）。
+    // 先占位后，同步重入在 2456 行即被去重拦下；异步重跑（flush 回调）同样被拦，
+    // 语义不变——需要重算时由失败/清空路径把 key 置回 null。
+    autoMixPreparationKeyRef.current = preparationKey
     // 冷启动/弱网动态门控：整首下载下一曲 FLAC × 2 + spawn 渲染 worker + 云端请求
     // 是重后台任务，当前曲缓冲还不健康（下载前沿领先播放位置 <30s）时让路——
     // 首播关键路径（歌曲/MV/歌词/封面）不被抢带宽。缓冲健康后自动重跑本函数
@@ -2513,8 +2521,8 @@ export function useAudioPlayer(
       if (!transitionPlanRef.current) armFallbackCrossfade('AutoMix preparation throttled (previous attempts failed)')
       return
     }
-    autoMixPreparationKeyRef.current = preparationKey
-    
+    // key 已在 gate 门控前占位（见 2456 行后注释）：此处不再重复设置
+
     debugLog('✅ [AutoMix] 开始准备智能混音过渡')
     const revision = ++preparationRevisionRef.current
     preparationAbortRef.current?.abort()

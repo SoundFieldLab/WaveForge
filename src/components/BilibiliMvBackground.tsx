@@ -958,7 +958,13 @@ export default memo(function BilibiliMvBackground({
     const hideOldMv = () => {
       // 切歌：清空**两个**槽（旧的视频彻底释放，不留残留），并标记下个 loadVideo
       // 直接进 active 槽替换（不等交叉淡化——淡入被快速切歌打断会一直空白）
+      // ⚠️ 必须同时清 stagedSlotRef（2026-11-18 修，用户实测 A↔B 来回切后 MV 串歌）：
+      // staged 槽是**上一曲方向预载**的视频（owner=上一曲的下一曲），hideOldMv 清掉
+      // owner 后 stagedSlotRef 若残留，"过渡结束补晋升"（1792）的 owner 校验被空字符串
+      // 绕过（owner && owner!==songKey 对 '' 不拦）→ 把别歌的预载视频当当前歌晋升。
+      // 预载视频的接管由主 effect 的 preload 路径（1064）负责，不走这条晋升。
       songSwitchedRef.current = true
+      stagedSlotRef.current = null
       setSlotAUrl(null)
       setSlotBUrl(null)
       slotBvidRef.current.A = ''
@@ -1796,7 +1802,11 @@ export default memo(function BilibiliMvBackground({
     const pending = transitionPreloadRef.current
     if (pending && !pending.failed && pending.trackKey !== songTrackKeyRef.current) return
     const owner = slotOwnerRef.current[staged]
-    if (owner && owner !== songKeyRef.current) return // 别歌的预载视频：不晋升
+    // owner 为空同样拒绝晋升（2026-11-18 收紧）：owner 被清空（hideOldMv/槽清理）说明
+    // 这个 staged 槽已不归任何歌所有——晋升它就是赌"内容恰好是当前歌"（A↔B 来回切时
+    // 恰好是上一轮预载，用户实测串歌）。主 effect 的 preload 接管路径有完整归属校验，
+    // 这里只晋升"owner 明确 === 当前歌"的视频。
+    if (owner !== songKeyRef.current) return
     const el = slotEl(staged)
     if (el && (el.currentSrc || el.src) && el.readyState >= 2) {
       void window.electron?.automixLog?.('MvAlign', `[背景] 过渡结束补晋升 槽${staged} owner=${owner || '空'} → 当前歌`)?.catch?.(() => undefined)
