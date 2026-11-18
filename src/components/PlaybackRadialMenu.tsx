@@ -39,7 +39,25 @@ interface PlaybackRadialMenuProps {
 }
 
 const LONG_PRESS_MS = 500
+/** 触屏轮盘长按时长（2026-11-18 用户口径）：手机上 500ms 太容易误触发轮盘——
+ *  用户只是在播放页停留/滑动，常驻 500ms 阈值会频繁弹出轮盘打断操作。
+ *  触屏统一 1.5s：长按 = 轮盘；右键菜单改为「双指同点」触发（见 TOUCH_TWO_FINGER_MS）。
+ *  桌面鼠标右键手势保持 500ms（真右键按住不会误触）。 */
+const TOUCH_LONG_PRESS_MS = 1500
+/** 双指同点 = 右键菜单（触屏版 contextmenu 语义）。第二根手指落下的判定窗口：
+ *  两指 touchstart 间隔超过该值视为两次独立点击（不弹菜单）。 */
+const TOUCH_TWO_FINGER_WINDOW_MS = 220
 const DIRECTION_THRESHOLD = 38
+
+/** 触觉反馈：原生桥 vibrate（Android WebView，有系统振动器）→ navigator.vibrate 兜底
+ *  （Chrome WebView 原生支持，但部分 ROM 需 WebView 层权限）。两级都不可用时静默。 */
+const hapticFeedback = (ms: number) => {
+  try {
+    const native = (window as any).WaveForgeNative?.vibrate
+    if (typeof native === 'function') { native(ms); return }
+  } catch { /* ignore */ }
+  try { navigator.vibrate?.(ms) } catch { /* ignore */ }
+}
 
 const ACTION_ICONS: Record<PlaybackRadialActionId, LucideIcon> = {
   'play-next': Repeat2,
@@ -228,18 +246,57 @@ export default function PlaybackRadialMenu({
     document.addEventListener('mouseup', handleMouseUp, true)
     document.addEventListener('contextmenu', handleContextMenu, true)
     window.addEventListener('blur', resetGesture)
-    // ── 触屏长按手势（pc-touch 手机/平板）：与右键手势同一状态机 ──
-    // Android WebView 长按会补发 contextmenu（ handled by handleContextMenu 的
-    // 抑制窗口），这里 touchstart/touchmove/touchend 直接驱动同一组 ref 状态：
-    // 长按 ≥LONG_PRESS_MS 出轮盘 → 手指滑动选向 → 松手执行。选向阈值在触屏上
-    // 放宽（手指抖动大）。
+    // ── 触屏手势（pc-touch 手机/平板，2026-11-18 重构，用户口径）──
+    //   长按 1.5s  → 径向轮盘（手指滑动选向 → 松手执行）
+    //   双指同点   → SongContextMenu（触屏版"右键菜单"，两指 220ms 内先后落下）
+    //   桌面鼠标右键手势不变（500ms）。Android WebView 的系统 contextmenu 已在
+    //   main.tsx 捕获层拦截，这里的手势是唯一入口，两套手势不会互相触发。
+    // 手机优化：
+    //   · 长按计时期间手指滑动超限 → 取消手势（页面滚动优先，不抢滚动）
+    //   · 第二根手指落下时立即取消长按计时（两指点击不能演变成轮盘）
+    //   · 双指同点在任一手指抬起时触发（用户"点一下"的实际语义是 tap，不等 touchend）
+    //   · 触觉反馈：轮盘弹出 20ms；双指菜单 10ms（轻确认）
     const TOUCH_MOVE_THRESHOLD_SCALE = 1.6
     const lastTouchRef = { current: null as { x: number; y: number } | null }
+    /** 双指检测：第一指落下时间 + 第一指位置（第二指须落在附近才算同点） */
+    let firstFingerAt = 0
+    let firstFingerPos: { x: number; y: number } | null = null
+    /** 双指手势已消费标记：touchend 时不再走长按/菜单回退 */
+    let twoFingerFired = false
+    /** 双指同点打开右键菜单（与 mouseup 回退路径同一目标） */
+    const openTwoFingerContextMenu = (x: number, y: number) => {
+      twoFingerFired = true
+      clearLongPressTimer()
+      contextMenuSuppressUntilRef.current = Date.now() + 600
+      setContextMenu({ show: true, x, y })
+      contextMenuOpenRef.current?.()
+      hapticFeedback(10)
+    }
     const handleTouchStart = (event: TouchEvent) => {
-      if (event.touches.length !== 1) return
-      const touch = event.touches[0]
       if (!isPlaybackPageTarget(event.target)) return
       if (event.target instanceof Element && event.target.closest('[data-playback-radial-block="true"]')) return
+      // 双指同点：第二根手指在窗口内落下且靠近第一指 → 右键菜单，长按计时立即作废
+      if (event.touches.length === 2) {
+        const second = event.touches[1]
+        const now = Date.now()
+        if (firstFingerAt && now - firstFingerAt <= TOUCH_TWO_FINGER_WINDOW_MS && firstFingerPos && second) {
+          const apart = Math.hypot(second.clientX - firstFingerPos.x, second.clientY - firstFingerPos.y)
+          if (apart <= 64) {
+            openTwoFingerContextMenu((firstFingerPos.x + second.clientX) / 2, (firstFingerPos.y + second.clientY) / 2)
+            return
+          }
+        }
+        // 两指落点太远/超时：不是同点双击，取消一切手势（防误触轮盘）
+        resetGesture()
+        firstFingerAt = 0
+        firstFingerPos = null
+        return
+      }
+      if (event.touches.length > 2) { resetGesture(); return }
+      const touch = event.touches[0]
+      firstFingerAt = Date.now()
+      firstFingerPos = { x: touch.clientX, y: touch.clientY }
+      twoFingerFired = false
       resetGesture()
       trackingRef.current = true
       originRef.current = { x: touch.clientX, y: touch.clientY }
@@ -249,9 +306,9 @@ export default function PlaybackRadialMenu({
         radialVisibleRef.current = true
         setRadialCenter({ ...originRef.current })
         // 触觉反馈（原生桥可用时）：轮盘弹出确认
-        try { (window as any).WaveForgeNative?.vibrate?.(20) } catch { /* ignore */ }
+        hapticFeedback(20)
         longPressTimerRef.current = null
-      }, LONG_PRESS_MS)
+      }, TOUCH_LONG_PRESS_MS)
     }
     const handleTouchMove = (event: TouchEvent) => {
       if (!trackingRef.current) return
@@ -281,12 +338,27 @@ export default function PlaybackRadialMenu({
       if (index !== selectedIndexRef.current) {
         selectedIndexRef.current = index
         setSelectedIndex(index)
+        // 选向跨格触觉确认（手机优化）：手指滑过扇区即感到档位，不用盯屏幕
+        hapticFeedback(8)
       }
     }
     const handleTouchEnd = (event: TouchEvent) => {
+      // 双指手势已被 touchstart 消费（菜单已开）：这次抬指不触发任何回退，
+      // 只重置双指检测状态，让下一次手势从干净状态开始
+      if (twoFingerFired) {
+        event.preventDefault()
+        if (event.touches.length <= 1) {
+          twoFingerFired = false
+          firstFingerAt = 0
+          firstFingerPos = null
+        }
+        return
+      }
       if (!trackingRef.current) return
       event.preventDefault()
-      // 与 mouseup 同一套执行/回退逻辑：轮盘可见执行选中项，否则弹自绘右键菜单
+      // 与 mouseup 同一套执行/回退逻辑：轮盘可见执行选中项，否则松手不弹菜单
+      //（触屏版右键菜单由「双指同点」触发，长按未到 1.5s 的普通点击就是普通点击，
+      // 不再像旧版那样弹 SongContextMenu——那是用户频繁误触菜单的根源）
       contextMenuSuppressUntilRef.current = Date.now() + 600
       if (radialVisibleRef.current) {
         const action = selectedIndexRef.current == null ? undefined : actions[selectedIndexRef.current]
@@ -309,10 +381,11 @@ export default function PlaybackRadialMenu({
         resetGesture()
         return
       }
+      // 长按未到 1.5s 的松手：普通点击，清手势即可——触屏版右键菜单由「双指同点」
+      // 触发（touchstart 阶段），不再像旧版那样松手弹 SongContextMenu
+      //（那是用户频繁误触菜单的根源）。桌面 mouseup 回退路径保留右键菜单。
       clearLongPressTimer()
       trackingRef.current = false
-      setContextMenu({ show: true, x: originRef.current.x, y: originRef.current.y })
-      contextMenuOpenRef.current?.()
     }
     document.addEventListener('touchstart', handleTouchStart, { capture: true, passive: true })
     document.addEventListener('touchmove', handleTouchMove, { capture: true, passive: false })

@@ -510,6 +510,29 @@ class MainActivity : Activity() {
                         -1.0
                     }
                 }
+
+                /** 触觉反馈（毫秒）：轮盘弹出/双指菜单等手势确认。主线程外调用安全
+                 *  （Vibrator 自身线程安全），无振动器/低配 TV 盒子静默忽略。 */
+                @android.webkit.JavascriptInterface
+                fun vibrate(ms: Int) {
+                    if (ms <= 0 || ms > 200) return
+                    try {
+                        val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                            val vm = getSystemService(android.os.VibratorManager::class.java)
+                            vm?.defaultVibrator
+                        } else {
+                            @Suppress("DEPRECATION")
+                            getSystemService(android.os.VIBRATOR_SERVICE) as? android.os.Vibrator
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                            vibrator?.vibrate(android.os.VibrationEffect.createOneShot(ms.toLong(), android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                        } else {
+                            @Suppress("DEPRECATION")
+                            vibrator?.vibrate(ms.toLong())
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
             }, "WaveForgeNative")
         }
         rootView.addView(webView)
