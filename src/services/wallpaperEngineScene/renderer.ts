@@ -14,6 +14,7 @@ import type { SceneLight, SceneManifest, SceneObject, ScenePass, SceneTextureInf
 import { parsePuppetMdl, PuppetPose, type PuppetModel } from './puppetMdl'
 import { parseModelMdl, type ParsedModelMesh } from './modelMdl'
 import { ParticleSystem, type ParticleTexture } from './particles'
+import { loadWallpaperEngineUserProps } from '../wallpaperEngineUserProperties'
 
 // 本地后端地址；调试页可用 ?server= 覆盖（如指向另起的测试实例端口），
 // ?server=same 走同源相对路径（配 vite dev proxy 用）。
@@ -315,12 +316,17 @@ export class WallpaperEngineSceneRenderer {
   }
 
   async load(wallpaperId: string): Promise<void> {
-    // 透传调试属性覆盖（探针 ?prop.<name>=<value>）→ manifest 求值用户属性时生效
+    // 透传调试属性覆盖（探针 ?prop.<name>=<value>）→ manifest 求值用户属性时生效；
+    // 再叠加设置弹窗保存的用户属性覆盖（localStorage，同名时弹窗值优先）。
+    // 注意：属性烤进 manifest 材质常量 → legacy 改属性需重挂生效（WWGL 主链才是热更）。
     const extraParams = new URLSearchParams()
     if (typeof window !== 'undefined') {
       for (const [k, v] of new URLSearchParams(window.location.search)) {
         if (k.startsWith('prop.')) extraParams.set(k, v)
       }
+    }
+    for (const [name, value] of Object.entries(loadWallpaperEngineUserProps(wallpaperId))) {
+      extraParams.set(`prop.${name}`, String(value))
     }
     const extra = extraParams.toString()
     const response = await fetch(

@@ -39,7 +39,7 @@
     "check:git": "node scripts/check-ignored-source.mjs",
     "build:android": "node scripts/build-android-assets.mjs",
     "publish:release": "node scripts/publish-release.mjs",
-    "test": "vitest run",
+    "test": "node scripts/run-vitest.mjs run",
     "test:chroma": "node scripts/test-chroma.cjs && node scripts/test-razer-device-discovery.cjs && node scripts/test-chroma-app-list-repair.cjs",
     "test:signalrgb": "node scripts/test-signalrgb.cjs && node scripts/test-signalrgb-effect.cjs",
     "benchmark:mv": "node scripts/bilibili-mv-benchmark.mjs",

@@ -11,7 +11,7 @@
  * - 两团氛围光斑（粉/紫）在容器内部缓慢晕染，增强"液体"质感
  * - 网格卡片 stagger 入场（延迟限幅 12 项）+ hover 浮起 + 图片淡入
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   Activity,
@@ -20,6 +20,7 @@ import {
   Image as ImageIcon,
   ListOrdered,
   MousePointer2,
+  Palette,
   RotateCcw,
   Shuffle,
   SlidersHorizontal,
@@ -29,6 +30,17 @@ import {
 } from 'lucide-react'
 import type { WallpaperEngineRotationSettings, WallpaperEngineWallpaper } from '../services/wallpaperEngineRotation'
 import type { WallpaperEnginePlaybackSettings } from '../services/wallpaperEnginePlayback'
+import {
+  effectivePropertyValue,
+  fetchWallpaperEngineUserProperties,
+  hexToRgbString,
+  loadWallpaperEngineUserProps,
+  resetWallpaperEngineUserProps,
+  rgbStringToHex,
+  saveWallpaperEngineUserProps,
+  type WEUserPropertyDecl,
+  type WEUserPropertyValues,
+} from '../services/wallpaperEngineUserProperties'
 import { getApiOrigin } from '../services/apiConfig'
 
 interface WallpaperEngineSettingsDialogProps {
@@ -54,6 +66,199 @@ const TYPE_BADGES: Record<WallpaperEngineWallpaper['type'], { label: string; cla
   image: { label: '图片', className: 'bg-emerald-500/80 text-white' },
   scene: { label: '场景 · 静态', className: 'bg-violet-500/80 text-white' },
   web: { label: 'Web', className: 'bg-blue-500/80 text-white' },
+}
+
+/**
+ * 壁纸属性区：当前壁纸自带的用户可调参数（project.json general.properties）。
+ * 改动即存 localStorage 覆盖值并广播事件——WWGL 主链 setProperties 热更即时生效；
+ * legacy 兜底由 SceneHost 监听同一事件重挂。声明拉取失败（video/image 壁纸无
+ * project.json）整区隐藏。
+ */
+function WallpaperPropertySection({ wallpaperId }: { wallpaperId: string }) {
+  const [decls, setDecls] = useState<WEUserPropertyDecl[] | null>(null)
+  const [overrides, setOverrides] = useState<WEUserPropertyValues>({})
+  const [hidden, setHidden] = useState(false)
+  // 属性多的壁纸（土星 90+）默认折叠：先露前 8 条，展开看全部
+  const [expanded, setExpanded] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setDecls(null)
+    setHidden(false)
+    setExpanded(false)
+    setOverrides(loadWallpaperEngineUserProps(wallpaperId))
+    fetchWallpaperEngineUserProperties(wallpaperId)
+      .then(list => { if (!cancelled) setDecls(list) })
+      .catch(() => { if (!cancelled) setHidden(true) })
+    return () => { cancelled = true }
+  }, [wallpaperId])
+
+  if (hidden || !decls || decls.length === 0) return null
+
+  const updateValue = (decl: WEUserPropertyDecl, value: WEUserPropertyValues[string]) => {
+    setOverrides(saveWallpaperEngineUserProps(wallpaperId, { [decl.name]: value }))
+  }
+  const resetAll = () => {
+    resetWallpaperEngineUserProps(wallpaperId)
+    setOverrides({})
+  }
+  const overrideCount = Object.keys(overrides).length
+  const visibleDecls = expanded ? decls : decls.slice(0, 8)
+  const collapsedCount = decls.length - visibleDecls.length
+
+  // 属性显示名：WE 文本以 ui_ 开头是本地化键（如 ui_browse_properties_scheme_color），
+  // 无本地化表可查 → schemecolor（WE 官方固定主配色属性）映射中文，其余回退属性名
+  const displayLabel = (decl: WEUserPropertyDecl) => {
+    const text = decl.text?.trim()
+    if (text && !text.startsWith('ui_')) return text
+    if (decl.name === 'schemecolor') return '主题配色'
+    return decl.name
+  }
+
+  return (
+    <div
+      className="rounded-2xl p-4"
+      style={{
+        background: 'rgba(255,255,255,0.06)',
+        border: '1px solid rgba(255,255,255,0.12)',
+        backdropFilter: 'blur(12px)',
+      }}
+    >
+      <div className="mb-3.5 flex items-center gap-2.5">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/15 text-cyan-200">
+          <Palette className="h-4 w-4" />
+        </div>
+        <div className="font-medium text-white">壁纸属性</div>
+        <div className="text-[11px] text-white/40">{decls.length} 项 · 即时生效</div>
+        {overrideCount > 0 && (
+          <button
+            type="button"
+            onClick={resetAll}
+            className="ml-auto flex items-center gap-1 rounded-lg border border-white/12 bg-white/[0.05] px-2.5 py-1.5 text-[11px] text-white/60 transition hover:bg-white/[0.1] hover:text-white/85"
+          >
+            <RotateCcw className="h-3 w-3" />恢复默认
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-2.5">
+        {visibleDecls.map(decl => {
+          const current = effectivePropertyValue(decl, overrides)
+          const label = displayLabel(decl)
+          if (decl.type === 'slider') {
+            const min = decl.min ?? 0
+            const max = decl.max ?? 1
+            const step = decl.step || (max > 2 ? 1 : 0.01)
+            return (
+              <div key={decl.name} className="flex items-center gap-3">
+                <span className="w-28 shrink-0 truncate text-xs text-white/70" title={label}>{label}</span>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={Number(current) || 0}
+                  onChange={event => updateValue(decl, Number(event.target.value))}
+                  className="h-1.5 flex-1 cursor-pointer accent-cyan-400"
+                  aria-label={label}
+                />
+                <span className="w-12 text-right text-xs tabular-nums text-white/60">
+                  {step >= 1 ? Math.round(Number(current) || 0) : (Number(current) || 0).toFixed(2)}
+                </span>
+              </div>
+            )
+          }
+          if (decl.type === 'bool') {
+            const checked = Boolean(current)
+            return (
+              <div key={decl.name} className="flex items-center justify-between gap-3 rounded-lg bg-black/20 px-3 py-2">
+                <span className="min-w-0 truncate text-xs text-white/70" title={label}>{label}</span>
+                <button
+                  type="button"
+                  onClick={() => updateValue(decl, !checked)}
+                  className={`relative h-6 w-10 shrink-0 rounded-full transition ${checked ? 'bg-cyan-500' : 'bg-white/15'}`}
+                  aria-label={label}
+                  aria-pressed={checked}
+                >
+                  <motion.span
+                    layout
+                    transition={{ type: 'spring', damping: 24, stiffness: 380 }}
+                    className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow ${checked ? 'left-5' : 'left-1'}`}
+                  />
+                </button>
+              </div>
+            )
+          }
+          if (decl.type === 'combo' && Array.isArray(decl.options) && decl.options.length > 0) {
+            return (
+              <div key={decl.name} className="flex items-center gap-3">
+                <span className="w-28 shrink-0 truncate text-xs text-white/70" title={label}>{label}</span>
+                <div className="flex flex-1 flex-wrap gap-1.5">
+                  {decl.options.map(option => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => updateValue(decl, option.value)}
+                      className={`rounded-lg border px-2.5 py-1.5 text-[11px] transition ${
+                        String(current) === option.value
+                          ? 'border-cyan-300/60 bg-cyan-500/16 text-cyan-100'
+                          : 'border-white/10 bg-white/[0.035] text-white/55 hover:bg-white/[0.07]'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          }
+          if (decl.type === 'color') {
+            const hex = rgbStringToHex(String(current))
+            return (
+              <div key={decl.name} className="flex items-center gap-3 rounded-lg bg-black/20 px-3 py-2">
+                <span className="min-w-0 flex-1 truncate text-xs text-white/70" title={label}>{label}</span>
+                <span className="text-[11px] tabular-nums text-white/45">{hex}</span>
+                <label
+                  className="relative h-7 w-9 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-white/25"
+                  style={{ background: hex }}
+                  aria-label={label}
+                >
+                  <input
+                    type="color"
+                    value={hex}
+                    onChange={event => updateValue(decl, hexToRgbString(event.target.value))}
+                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                  />
+                </label>
+              </div>
+            )
+          }
+          // textinput
+          return (
+            <div key={decl.name} className="flex items-center gap-3">
+              <span className="w-28 shrink-0 truncate text-xs text-white/70" title={label}>{label}</span>
+              <input
+                type="text"
+                value={String(current ?? '')}
+                onChange={event => updateValue(decl, event.target.value)}
+                className="h-9 min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-white outline-none transition focus:border-cyan-300/60 focus:bg-white/[0.08]"
+                aria-label={label}
+              />
+            </div>
+          )
+          })}
+        {collapsedCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="w-full rounded-lg border border-white/10 bg-white/[0.04] py-2 text-[11px] text-white/50 transition hover:bg-white/[0.08] hover:text-white/75"
+          >
+            展开其余 {collapsedCount} 项属性
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export default function WallpaperEngineSettingsDialog({
@@ -295,6 +500,11 @@ export default function WallpaperEngineSettingsDialog({
                       </div>
                     </div>
                   </div>
+
+                  {/* 壁纸属性：当前壁纸自带的可调参数（配色/滑块/开关/下拉/文本） */}
+                  {selectedWeWallpaper && (
+                    <WallpaperPropertySection wallpaperId={selectedWeWallpaper} />
+                  )}
 
                   {/* 提示：需要关闭同步 */}
                   {wallpaperSyncEnabled && (

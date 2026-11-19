@@ -13801,6 +13801,31 @@ app.get('/api/wallpaper-engine/scene/manifest', async (req, res) => {
   }
 })
 
+// WE 壁纸用户属性声明：project.json general.properties（供设置界面渲染可调参数 UI：
+// slider/color/bool/combo/textinput，value 为 WE 默认值；用户覆盖值由前端单独存储，
+// 经挂载选项 / setProperties 热更注入 WWGL，经 ?prop.* 参数注入 legacy manifest）。
+app.get('/api/wallpaper-engine/scene/properties', async (req, res) => {
+  try {
+    const { id } = req.query
+    if (!id) return res.status(400).json({ success: false, message: '缺少 id' })
+    const dir = await resolveWallpaperEngineSceneDir(id)
+    if (!dir) return res.status(404).json({ success: false, message: '壁纸目录未找到' })
+    let project = null
+    try {
+      project = JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))
+    } catch {
+      // project.json 损坏/缺失：视为无属性（video/image 类壁纸目录本就没有）
+      return res.json({ success: true, id: String(id), title: '', properties: {} })
+    }
+    const raw = project?.general?.properties
+    const properties = raw && typeof raw === 'object' ? raw : {}
+    res.json({ success: true, id: String(id), title: project.title || '', properties })
+  } catch (error) {
+    console.error('[WEScene] 壁纸属性读取失败:', error)
+    res.status(500).json({ success: false, message: error.message })
+  }
+})
+
 // 场景着色器源码批量下发：manifest 的 pass 带 shaderRef 引用（全文不再内联——
 // 太阳系 847 对象内联超 V8 字符串上限 500 实证）。渲染端拉到 manifest 后取此端点水合。
 app.get('/api/wallpaper-engine/scene/shaders', async (req, res) => {

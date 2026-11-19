@@ -15,6 +15,11 @@ import { useEffect, useRef } from 'react'
 import { mount, httpSource, type SceneInstance } from 'webwallgl'
 import { subscribeWeSpectrum } from '../services/wallpaperEngineScene/spectrumBus'
 import type { WallpaperEnginePlaybackSettings } from '../services/wallpaperEnginePlayback'
+import {
+  loadWallpaperEngineUserProps,
+  subscribeWallpaperEngineUserProps,
+  type WEUserPropertyValues,
+} from '../services/wallpaperEngineUserProperties'
 import { getApiOrigin } from '../services/apiConfig'
 
 interface Props {
@@ -60,6 +65,19 @@ export function WallpaperEngineWwglCanvas({ wallpaperId, onFail, paused = false,
   // 播放参数：ref 供挂载闭包（audio.snapshot）读取，避免挂载 effect 依赖整个 playback 对象
   const playbackRef = useRef(playback)
   playbackRef.current = playback
+
+  // 用户属性热更：设置弹窗改属性 → 事件 → setProperties（库就地改属性表/效果常量/
+  // 脚本沙箱，不重拉 scene.pkg）。挂在 wallpaperId 前的 mount 期间变更由挂载闭包末尾
+  // 的对齐逻辑兜底（userPropsRef 恒存最新值）。
+  const userPropsRef = useRef<WEUserPropertyValues>(loadWallpaperEngineUserProps(wallpaperId))
+  useEffect(() => {
+    userPropsRef.current = loadWallpaperEngineUserProps(wallpaperId)
+    return subscribeWallpaperEngineUserProps((detail) => {
+      if (detail.wallpaperId !== wallpaperId) return
+      userPropsRef.current = detail.values
+      instanceRef.current?.setProperties(detail.values)
+    })
+  }, [wallpaperId])
 
   // suspended 切换：pause/resume 场景实例（实例不销毁 → 场景时间不回卷、过场动画不重播）
   useEffect(() => {
@@ -132,6 +150,8 @@ export function WallpaperEngineWwglCanvas({ wallpaperId, onFail, paused = false,
           autoplay: true,
           // 帧率上限（库默认 60）：挂载即按当前设置
           fps: initialPlayback?.fpsLimit,
+          // 用户属性初始覆盖（设置弹窗保存的值；空对象无害）
+          properties: userPropsRef.current,
           // 音量 0..1：挂载选项默认静音起步（自动播放策略），挂载完成后由 effect 应用
           audio: {
             snapshot: () => {
@@ -159,6 +179,10 @@ export function WallpaperEngineWwglCanvas({ wallpaperId, onFail, paused = false,
           inst.setVolume(clamp01(current.volume / 100))
           inst.setFps(current.fpsLimit)
           if (!current.parallaxEnabled) inst.pushPointer(0.5, 0.5)
+        }
+        // 挂载期间用户属性可能已变更（事件在 instanceRef 就绪前到达）：对齐最新覆盖
+        if (Object.keys(userPropsRef.current).length > 0) {
+          inst.setProperties(userPropsRef.current)
         }
       } catch (error) {
         if (!cancelled) {

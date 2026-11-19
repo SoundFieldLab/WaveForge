@@ -6,10 +6,11 @@
  * - 两者都失败才 onFinalFail（DesktopView 提示并回退静态 preview）
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { WallpaperEngineSceneCanvas } from './WallpaperEngineSceneCanvas'
 import { WallpaperEngineWwglCanvas } from './WallpaperEngineWwglCanvas'
 import type { WallpaperEnginePlaybackSettings } from '../services/wallpaperEnginePlayback'
+import { subscribeWallpaperEngineUserProps } from '../services/wallpaperEngineUserProperties'
 
 interface Props {
   wallpaperId: string
@@ -57,15 +58,29 @@ function resolvePreferredRenderer(wallpaperId: string): 'wwgl' | 'legacy' {
 
 export function WallpaperEngineSceneHost({ wallpaperId, onFinalFail, paused = false, playback }: Props) {
   const [mode, setMode] = useState<'wwgl' | 'legacy'>(() => resolvePreferredRenderer(wallpaperId))
+  // legacy 渲染器重挂计数：用户属性改动后 bump（legacy 属性烤进 manifest 材质常量，
+  // 热更需整链重拉；WWGL 主链 setProperties 热更不走这里）
+  const [legacyReloadNonce, setLegacyReloadNonce] = useState(0)
+  const modeRef = useRef(mode)
+  modeRef.current = mode
 
   // 换壁纸时按覆盖表重置渲染链
   useEffect(() => {
     setMode(resolvePreferredRenderer(wallpaperId))
   }, [wallpaperId])
 
+  // 用户属性变更：legacy 模式下重挂（WWGL 模式由画布自身订阅热更，不重挂）
+  useEffect(() => {
+    return subscribeWallpaperEngineUserProps((detail) => {
+      if (detail.wallpaperId !== wallpaperId) return
+      if (modeRef.current === 'legacy') setLegacyReloadNonce(n => n + 1)
+    })
+  }, [wallpaperId])
+
   if (mode === 'legacy') {
     return (
       <WallpaperEngineSceneCanvas
+        key={legacyReloadNonce}
         wallpaperId={wallpaperId}
         paused={paused}
         playback={playback}
