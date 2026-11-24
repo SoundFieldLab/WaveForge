@@ -1,0 +1,17 @@
+{
+  "version": "0.1.5",
+  "codename": "涟漪 さざなみ",
+  "androidVersionCode": 105,
+  "notes": "v0.1.5 正式版\n\n## 桌面端\n- 壁纸引擎（Wallpaper Engine）支持大幅增强：场景同步修复、粒子系统、音频响应、WWGL 主渲染链、独立设置弹窗与播放参数\n- WE 壁纸用户属性暴露到设置弹窗——配色/滑块/开关/下拉/文本修改即时生效\n- 修复 AutoMix 同步递归风暴 + A↔B 来回切 MV 串歌\n- 修复崩铁官号漏识别致官方 EP 被转录号盖过\n- 修复 PC 端歌词刚唱完的邻行不再虚化（release blur ramp 排除 distance=1）\n\n## Android 端\n- 播放页触屏手势重定义：双指同点开右键菜单 + 长按 1.5s 弹轮盘\n- 触觉反馈桥接入，歌词滚动优先\n- 排行榜/精选歌单/新碟「查看全部」展开；歌手行/相似歌曲直达\n- 手机遥控器加进度条 seek\n- API 28+ 挖孔屏全屏适配（内容延伸进刘海区）\n- Android 触屏端降载与后台时钟修复批次",
+  "artifacts": {
+    "win-x64": {
+      "urls": [
+        "https://ghproxy.net/https://github.com/SoundFieldLab/WaveForge/releases/download/v0.1.5/WaveForge-0.1.5-Setup.exe",
+        "https://mirror.ghproxy.com/https://github.com/SoundFieldLab/WaveForge/releases/download/v0.1.5/WaveForge-0.1.5-Setup.exe",
+        "https://github.com/SoundFieldLab/WaveForge/releases/download/v0.1.5/WaveForge-0.1.5-Setup.exe"
+      ],
+      "sha256": "234c7a6916d18c798e2430d8b5cd2468f54b6ee909cd6fd6c043d25feef9db34"
+    }
+  },
+  "manifestSignature": "OC5q81tMCnV1kyZol4ECTt4eeatwGcRKiaSxEg3BLQrrXWNpUXQBbocxpYaJA11cn9CdBMcbZaqiS0GAsp+RDw=="
+}
