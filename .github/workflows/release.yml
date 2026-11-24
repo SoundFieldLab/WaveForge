@@ -90,9 +90,13 @@ jobs:
 
       - name: 发布到 Gitee + GitHub，生成并推送 update.json
         run: |
+          # 未配置 keystore secret 时产物为 app-release-unsigned.apk，用 glob 兜底
+          APK=$(ls android/app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then echo "未找到 APK 产物" && exit 1; fi
+          echo "发布 APK: $APK"
           NOTES=$(git tag -l --format='%(subject)%0a%0a%(body)' "$GITHUB_REF_NAME" | sed 's/^ *//' | sed '/^$/d' | head -20)
           node scripts/publish-release.mjs \
-            --apk android/app/build/outputs/apk/release/app-release.apk \
+            --apk "$APK" \
             --notes "$NOTES"
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
