@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 28+：挖孔屏模式。always = 内容延伸进刘海/挖孔区（配合原生 insets padding 归零
+     的沉浸逻辑，全屏无黑条）。 -->
+<resources>
+    <style name="Theme.WaveForge" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+    </style>
+</resources>
