@@ -266,5 +266,11 @@
   },
   "optionalDependencies": {
     "@lox-audioserver/node-librespot": "^0.5.1"
+  },
+  "allowScripts": {
+    "github:castlabs/electron-releases#9b90904e4fe174122b99eca5b7b967aa79681cc6": true,
+    "useragent-ng@2.4.5": true,
+    "core-js@2.6.12": true,
+    "@lox-audioserver/node-librespot@0.5.1": true
   }
 }

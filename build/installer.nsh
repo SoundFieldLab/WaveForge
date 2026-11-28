@@ -576,7 +576,10 @@ FunctionEnd
           FileWrite $1 "exit=$0"
           FileClose $1
         !else
-          Exec '"$PLUGINSDIR\webui\WaveForgeSetupUI.exe" --bootstrap "$PLUGINSDIR\webui\bootstrap.txt"'
+          ; 等待壳退出：Exec + Quit 会让 NSIS 在壳仍需按需加载 WebView2 托管程序集时
+          ; 清理 $PLUGINSDIR（FileNotFoundException → ERR_FILE_NOT_FOUND 白屏）。
+          ; ExecWait 保证临时目录在壳正常退出后才回收。
+          ExecWait '"$PLUGINSDIR\webui\WaveForgeSetupUI.exe" --bootstrap "$PLUGINSDIR\webui\bootstrap.txt"' $0
         !endif
         Quit
       ${EndIf}
